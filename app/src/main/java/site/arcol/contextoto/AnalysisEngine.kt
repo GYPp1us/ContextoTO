@@ -25,8 +25,8 @@ class AnalysisEngine(private val content: Content, private val store: UserStore)
     private fun cacheId(kind: String, provider: Provider, source: String): String =
         Content.sha256("$promptVersion|$kind|${provider.baseUrl}|${provider.model}|$source")
 
-    fun cachedParagraph(provider: Provider, paragraph: String): JSONObject? = store.getAnalysis(
-        cacheId("paragraph", provider, paragraph)
+    fun cachedSentence(provider: Provider, sentence: String): JSONObject? = store.getAnalysis(
+        cacheId("sentence", provider, sentence)
     )?.let(::JSONObject)
 
     fun cachedWord(provider: Provider, paragraph: String, token: Token): JSONObject? {
@@ -37,11 +37,11 @@ class AnalysisEngine(private val content: Content, private val store: UserStore)
         return mergeWord(JSONObject(contextJson), store.getAnalysis(commonKey)?.let(::JSONObject))
     }
 
-    suspend fun paragraph(
-        provider: Provider, article: Article, paragraphIndex: Int, onProgress: (QueryProgress) -> Unit
+    suspend fun sentence(
+        provider: Provider, article: Article, sentence: Sentence, onProgress: (QueryProgress) -> Unit
     ): JSONObject {
-        val text = article.paragraphs[paragraphIndex]
-        val key = cacheId("paragraph", provider, text)
+        val text = sentence.text
+        val key = cacheId("sentence", provider, text)
         store.getAnalysis(key)?.let { return JSONObject(it) }
         val lock = locks.getOrPut(key) { Mutex() }
         return lock.withLock {
@@ -52,17 +52,17 @@ class AnalysisEngine(private val content: Content, private val store: UserStore)
             }.distinct().joinToString(", ")
             val instruction = """
                 你是面向中文母语者的英语阅读教师。只返回一个严格 JSON 对象，不要 Markdown。
-                schema_version=1; type=paragraph_analysis; paragraph_id=${article.id}-$paragraphIndex。
-                字段：translation_zh（忠实、自然的整段中文释义）；clauses 数组（每项 sentence_id 整数、start 整数、end 整数、quote 原文子串、kind 从句类型中文、brief_zh 简短说明）；glosses 数组（每项 start、end、quote、brief_zh）。
-                start/end 是这一个段落原文的 UTF-16 起止索引，左闭右开。不要编造文本。优先给出有教学价值的从句；主句可作为范围。嵌套从句允许重叠。
-                从句最多列 8 个最有教学价值的范围；glosses 最多列 12 个词，只解释下列命中词库的原文出现，释义必须符合本句：$matched
+                schema_version=1; type=sentence_analysis。
+                字段：translation_zh（忠实、自然的整句中文释义）；clauses 数组（每项 start 整数、end 整数、quote 原文子串、kind 从句类型中文、brief_zh 简短说明）；glosses 数组（每项 start、end、quote、brief_zh）。
+                start/end 是这一个句子原文的 UTF-16 起止索引，左闭右开。不要编造文本。标出主句和有教学价值的从句，嵌套时允许重叠。
+                从句最多列 5 个；glosses 最多列 8 个词，只解释下列命中词库的原文出现，释义必须符合本句：$matched
             """.trimIndent()
-            val response = request(provider, instruction, "文章：${article.title}\n段落原文：\n$text", "medium", onProgress)
+            val response = request(provider, instruction, "文章：${article.title}\n句子原文：\n$text", "medium", onProgress)
             val result = JSONObject(response.text)
-            require(result.optString("translation_zh").isNotBlank()) { "段落结果缺少中文释义" }
+            require(result.optString("translation_zh").isNotBlank()) { "句子结果缺少中文释义" }
             result.put("clauses", validatedRanges(result.optJSONArray("clauses"), text))
             result.put("glosses", validatedRanges(result.optJSONArray("glosses"), text))
-            store.putAnalysis(key, "paragraph", result.toString())
+            store.putAnalysis(key, "sentence", result.toString())
             result
         }
     }

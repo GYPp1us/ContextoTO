@@ -58,9 +58,11 @@ class Content(context: Context) {
             val iterator = BreakIterator.getSentenceInstance(Locale.US)
             iterator.setText(text)
             val safe = offset.coerceIn(0, text.length.coerceAtLeast(1) - 1)
-            val start = iterator.preceding(safe + 1).let { if (it == BreakIterator.DONE) 0 else it }
-            val end = iterator.following(safe).let { if (it == BreakIterator.DONE) text.length else it }
-            return Sentence(text.substring(start, end).trim(), start, end)
+            var start = iterator.preceding(safe + 1).let { if (it == BreakIterator.DONE) 0 else it }
+            var end = iterator.following(safe).let { if (it == BreakIterator.DONE) text.length else it }
+            while (start < end && text[start].isWhitespace()) start++
+            while (end > start && text[end - 1].isWhitespace()) end--
+            return Sentence(text.substring(start, end), start, end)
         }
         fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
             .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }

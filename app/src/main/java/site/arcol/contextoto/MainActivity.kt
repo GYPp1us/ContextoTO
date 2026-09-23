@@ -111,7 +111,8 @@ private fun palette(dark: Boolean) = if (dark) Palette(
     Color(0xFF5D7B72), Color(0xFFA87562), Color(0xFF897999), Color(0xFFA48656)
 )
 
-private data class WordTarget(val paragraphIndex: Int, val token: Token, val anchor: Rect, val inParagraph: Boolean)
+private data class WordTarget(val paragraphIndex: Int, val token: Token, val anchor: Rect, val inSentence: Boolean)
+private data class SentenceTarget(val paragraphIndex: Int, val sentence: Sentence)
 private data class ReaderScale(val bodySize: Float, val lineFactor: Float, val sideMargin: Float, val paragraphGap: Float)
 
 @Composable
@@ -132,16 +133,16 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     var provider by remember { mutableStateOf(settings.provider()) }
     var drawerOpen by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
-    var paragraphOpen by remember { mutableStateOf<Int?>(null) }
+    var sentenceOpen by remember { mutableStateOf<SentenceTarget?>(null) }
     var wordTarget by remember { mutableStateOf<WordTarget?>(null) }
     var wordResult by remember { mutableStateOf<JSONObject?>(null) }
-    var paragraphResult by remember { mutableStateOf<JSONObject?>(null) }
+    var sentenceResult by remember { mutableStateOf<JSONObject?>(null) }
     var wordProgress by remember { mutableStateOf<QueryProgress?>(null) }
-    var paragraphProgress by remember { mutableStateOf<QueryProgress?>(null) }
+    var sentenceProgress by remember { mutableStateOf<QueryProgress?>(null) }
     var wordError by remember { mutableStateOf<String?>(null) }
-    var paragraphError by remember { mutableStateOf<String?>(null) }
+    var sentenceError by remember { mutableStateOf<String?>(null) }
     var retryWord by remember { mutableIntStateOf(0) }
-    var retryParagraph by remember { mutableIntStateOf(0) }
+    var retrySentence by remember { mutableIntStateOf(0) }
     var lookupEpoch by remember { mutableIntStateOf(0) }
     val savedItem = if (article.id == initial?.articleId) initial.item else 0
     val savedOffset = if (article.id == initial?.articleId) initial.offset else 0
@@ -151,11 +152,11 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         when {
             settingsOpen -> settingsOpen = false
             wordTarget != null -> wordTarget = null
-            paragraphOpen != null -> paragraphOpen = null
+            sentenceOpen != null -> sentenceOpen = null
             drawerOpen -> drawerOpen = false
         }
     }
-    BackHandler(settingsOpen || wordTarget != null || paragraphOpen != null || drawerOpen) { closeTop() }
+    BackHandler(settingsOpen || wordTarget != null || sentenceOpen != null || drawerOpen) { closeTop() }
 
     LaunchedEffect(article.id, listState) {
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
@@ -166,10 +167,10 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     LaunchedEffect(article.id, provider.name, provider.key, provider.model) {
         if (provider.key.isNotBlank()) {
             val visibleIndex = (listState.firstVisibleItemIndex - 1).coerceIn(article.paragraphs.indices)
-            val next = article.paragraphs.indices.firstOrNull { index ->
-                index >= visibleIndex && engine.cachedParagraph(provider, article.paragraphs[index]) == null
-            }
-            if (next != null) runCatching { engine.paragraph(provider, article, next) {} }
+            val next = article.paragraphs.indices.asSequence().filter { it >= visibleIndex }
+                .map { index -> Content.sentenceAt(article.paragraphs[index], 0) }
+                .firstOrNull { engine.cachedSentence(provider, it.text) == null }
+            if (next != null) runCatching { engine.sentence(provider, article, next) {} }
         }
     }
     LaunchedEffect(wordTarget, retryWord, provider) {
@@ -191,30 +192,30 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
             }.onFailure { wordError = readableQueryError(it); wordProgress = null }
         }
     }
-    LaunchedEffect(paragraphOpen, retryParagraph, provider) {
-        val index = paragraphOpen ?: return@LaunchedEffect
-        paragraphResult = null; paragraphProgress = null; paragraphError = null
-        val text = article.paragraphs[index]
-        val cached = engine.cachedParagraph(provider, text)
+    LaunchedEffect(sentenceOpen, retrySentence, provider) {
+        val target = sentenceOpen ?: return@LaunchedEffect
+        sentenceResult = null; sentenceProgress = null; sentenceError = null
+        val cached = engine.cachedSentence(provider, target.sentence.text)
         if (cached != null) {
-            paragraphResult = cached
-            store.recordLookup(article.id, "paragraph", index.toString()); lookupEpoch++
+            sentenceResult = cached
+            store.recordLookup(article.id, "sentence", "${target.paragraphIndex}:${target.sentence.start}"); lookupEpoch++
         } else if (provider.key.isBlank()) {
-            paragraphError = "尚未配置 API Key。英文原段仍可阅读。"
+            sentenceError = "尚未配置 API Key。英文原句仍可阅读。"
         } else {
-            runCatching { engine.paragraph(provider, article, index) { paragraphProgress = it } }
+            runCatching { engine.sentence(provider, article, target.sentence) { sentenceProgress = it } }
                 .onSuccess {
-                    paragraphResult = it; paragraphProgress = null
-                    store.recordLookup(article.id, "paragraph", index.toString()); lookupEpoch++
-                }.onFailure { paragraphError = readableQueryError(it); paragraphProgress = null }
+                    sentenceResult = it; sentenceProgress = null
+                    store.recordLookup(article.id, "sentence", "${target.paragraphIndex}:${target.sentence.start}"); lookupEpoch++
+                }.onFailure { sentenceError = readableQueryError(it); sentenceProgress = null }
         }
     }
 
-    val hasOverlay = drawerOpen || settingsOpen || paragraphOpen != null || wordTarget != null
+    val hasOverlay = drawerOpen || settingsOpen || sentenceOpen != null || wordTarget != null
     val blur by animateFloatAsState(if (hasOverlay) 26f else 0f, tween(290, easing = FastOutSlowInEasing), label = "body blur")
 
     BoxWithConstraints(Modifier.fillMaxSize().background(colors.paper).navigationBarsPadding()) {
         val width = maxWidth
+        val height = maxHeight
         val density = LocalDensity.current
         val drawerShift by animateFloatAsState(if (drawerOpen) with(density) { (width * .60f).toPx() } else 0f,
             tween(340, easing = FastOutSlowInEasing), label = "drawer shift")
@@ -246,7 +247,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                         InteractiveParagraph(text, colors, null, content, store.queriedWords(article.id), scale,
                             Modifier.fillMaxWidth().padding(bottom = scale.paragraphGap.dp),
                             onWord = { token, anchor -> wordTarget = WordTarget(index, token, anchor, false) },
-                            onLongWord = { paragraphOpen = index })
+                            onLongWord = { token -> sentenceOpen = SentenceTarget(index, Content.sentenceAt(text, token.start)) })
                     }
                 }
             }
@@ -257,34 +258,37 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
             ArticleDrawer(content, store, article.id, lookupEpoch, colors,
                 Modifier.width(width * .80f).fillMaxHeight().align(Alignment.CenterStart),
                 onSelect = { index ->
-                    articleIndex = index; wordTarget = null; paragraphOpen = null; drawerOpen = false
+                    articleIndex = index; wordTarget = null; sentenceOpen = null; drawerOpen = false
                     store.savePlace(content.articles[index].id, 0, 0)
                 }, onSettings = { drawerOpen = false; settingsOpen = true })
         }
 
-        val activeParagraph = paragraphOpen
-        if (activeParagraph != null) {
-            GlassScrim(colors) { paragraphOpen = null; wordTarget = null }
-            val secondBlur by animateFloatAsState(if (wordTarget?.inParagraph == true) 23f else 0f,
-                tween(220), label = "paragraph behind word blur")
+        val activeSentence = sentenceOpen
+        if (activeSentence != null) {
+            GlassScrim(colors) { sentenceOpen = null; wordTarget = null }
+            val secondBlur by animateFloatAsState(if (wordTarget?.inSentence == true) 23f else 0f,
+                tween(220), label = "sentence behind word blur")
             Box(Modifier.fillMaxSize().graphicsLayer {
                 renderEffect = if (secondBlur > .1f) BlurEffect(secondBlur, secondBlur, TileMode.Clamp) else null
             }) {
-                ParagraphSheet(article, activeParagraph, paragraphResult, paragraphProgress, paragraphError,
-                    content, store, colors, scale, Modifier.align(Alignment.TopCenter).fillMaxWidth().fillMaxHeight(.85f),
-                    onWord = { token, anchor -> wordTarget = WordTarget(activeParagraph, token, anchor, true) },
-                    onRetry = { retryParagraph++ })
+                SentenceSheet(article, activeSentence, sentenceResult, sentenceProgress, sentenceError,
+                    content, store, colors, scale, Modifier.align(Alignment.TopCenter).fillMaxWidth().heightIn(max = height * .82f),
+                    onWord = { token, anchor ->
+                        val absolute = Token(token.text, token.start + activeSentence.sentence.start,
+                            token.end + activeSentence.sentence.start)
+                        wordTarget = WordTarget(activeSentence.paragraphIndex, absolute, anchor, true)
+                    }, onRetry = { retrySentence++ })
             }
-            if (wordTarget?.inParagraph == true) {
+            if (wordTarget?.inSentence == true) {
                 GlassScrim(colors) { wordTarget = null }
             }
         }
 
         wordTarget?.let { target ->
-            if (!target.inParagraph) GlassScrim(colors) { wordTarget = null }
+            if (!target.inSentence) GlassScrim(colors) { wordTarget = null }
             WordSheet(target, article, content, wordResult, wordProgress, wordError, colors,
                 maxWidth, maxHeight, onRetry = { retryWord++ }, onConfigure = {
-                    wordTarget = null; paragraphOpen = null; settingsOpen = true
+                    wordTarget = null; sentenceOpen = null; settingsOpen = true
                 })
         }
 
@@ -379,12 +383,12 @@ private fun ArticleDrawer(
             Text("48", color = colors.word, fontSize = 14.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(8.dp))
-        Text("继续阅读 / 已查询词 / 已查询段", Modifier.padding(horizontal = 25.dp), color = colors.muted, fontSize = 11.sp)
+        Text("继续阅读 / 已查询词 / 已查询句", Modifier.padding(horizontal = 25.dp), color = colors.muted, fontSize = 11.sp)
         Spacer(Modifier.height(18.dp))
         LazyColumn(Modifier.weight(1f)) {
             itemsIndexed(content.articles) { index, article ->
                 val words = remember(epoch, article.id) { store.countLookups(article.id, "word") }
-                val paragraphs = remember(epoch, article.id) { store.countLookups(article.id, "paragraph") }
+                val sentences = remember(epoch, article.id) { store.countLookups(article.id, "sentence") }
                 Column(Modifier.fillMaxWidth().clickable { onSelect(index) }.padding(horizontal = 25.dp, vertical = 14.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("${index + 1}".padStart(2, '0'), color = colors.word, fontSize = 13.sp,
@@ -399,7 +403,7 @@ private fun ArticleDrawer(
                     Spacer(Modifier.height(7.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         Text("词 $words", color = colors.word, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        Text("段 $paragraphs", color = colors.paragraph, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("句 $sentences", color = colors.paragraph, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -413,27 +417,24 @@ private fun ArticleDrawer(
 }
 
 @Composable
-private fun ParagraphSheet(
-    article: Article, index: Int, result: JSONObject?, progress: QueryProgress?, error: String?,
+private fun SentenceSheet(
+    article: Article, target: SentenceTarget, result: JSONObject?, progress: QueryProgress?, error: String?,
     content: Content, store: UserStore, colors: Palette, scale: ReaderScale, modifier: Modifier,
     onWord: (Token, Rect) -> Unit, onRetry: () -> Unit
 ) {
-    val text = article.paragraphs[index]
+    val text = target.sentence.text
     val queried = remember(article.id, result) { store.queriedWords(article.id) }
-    Column(modifier.background(colors.sheet).padding(horizontal = 24.dp, vertical = 28.dp)) {
-        Text("PARAGRAPH / ${index + 1}", color = colors.paragraph, fontSize = 11.sp,
+    Column(modifier.background(colors.sheet).verticalScroll(rememberScrollState())
+        .padding(horizontal = 24.dp, vertical = 28.dp)) {
+        Text("SENTENCE / ${article.id.uppercase()}", color = colors.paragraph, fontSize = 11.sp,
             fontWeight = FontWeight.Bold, letterSpacing = 1.7.sp)
-        Spacer(Modifier.height(10.dp))
-        Column(Modifier.weight(.43f).fillMaxWidth().verticalScroll(rememberScrollState())) {
-            InteractiveParagraph(text, colors, result, content, queried,
-                scale.copy(bodySize = (scale.bodySize * .86f).coerceAtLeast(15f), lineFactor = 1.46f),
-                onWord = onWord, onLongWord = {})
-            Spacer(Modifier.height(12.dp))
-        }
-        Spacer(Modifier.height(18.dp))
-        Column(Modifier.weight(.57f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+        Spacer(Modifier.height(13.dp))
+        InteractiveParagraph(text, colors, result, content, queried,
+            scale.copy(bodySize = (scale.bodySize * 1.12f).coerceAtLeast(18f), lineFactor = 1.48f),
+            onWord = onWord, onLongWord = {})
+        Spacer(Modifier.height(25.dp))
           if (result != null) {
-            Text("整段释义", color = colors.paragraph, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            Text("整句释义", color = colors.paragraph, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
             Text(result.optString("translation_zh"), color = colors.ink, fontSize = 19.sp, lineHeight = 30.sp,
                 fontFamily = FontFamily.Serif)
@@ -461,7 +462,7 @@ private fun ParagraphSheet(
             val glosses = result.optJSONArray("glosses")
             if (glosses != null && glosses.length() > 0) {
                 Spacer(Modifier.height(15.dp))
-                Text("本段词语", color = colors.paragraph, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("本句词语", color = colors.paragraph, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 for (i in 0 until glosses.length()) {
                     val item = glosses.optJSONObject(i) ?: continue
                     val word = item.optString("quote")
@@ -477,7 +478,6 @@ private fun ParagraphSheet(
             ProgressBlock(progress, colors)
           }
           Spacer(Modifier.height(32.dp))
-        }
     }
 }
 
