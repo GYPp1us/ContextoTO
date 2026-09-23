@@ -438,7 +438,7 @@ private fun SentenceSheet(
 ) {
     val text = target.sentence.text
     val queried = remember(article.id, result) { store.queriedWords(article.id) }
-    Column(modifier.background(colors.sheet).verticalScroll(rememberScrollState())
+    Column(modifier.verticalScroll(rememberScrollState())
         .padding(horizontal = 24.dp, vertical = 28.dp)) {
         Text("SENTENCE / ${article.id.uppercase()}", color = colors.paragraph, fontSize = 11.sp,
             fontWeight = FontWeight.Bold, letterSpacing = 1.7.sp)
