@@ -164,9 +164,10 @@ class AnalysisEngine(private val content: Content, private val store: UserStore)
                 if (data == "[DONE]") break
                 val chunk = runCatching { JSONObject(data) }.getOrNull() ?: continue
                 val delta = chunk.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta")
-                val reasoning = delta?.optString("reasoning_content").orEmpty()
+                val reasoning = if (delta == null || delta.isNull("reasoning_content")) ""
+                    else delta.optString("reasoning_content")
                 if (reasoning.isNotBlank()) reasoningChars += reasoning.length
-                val added = delta?.optString("content").orEmpty()
+                val added = if (delta == null || delta.isNull("content")) "" else delta.optString("content")
                 if (added.isNotEmpty()) output.append(added)
                 val usage = chunk.optJSONObject("usage")
                 if (usage != null) exactTokens = usage.optJSONObject("completion_tokens_details")?.optInt("reasoning_tokens")

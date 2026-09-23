@@ -15,6 +15,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -144,6 +146,10 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     var retryWord by remember { mutableIntStateOf(0) }
     var retrySentence by remember { mutableIntStateOf(0) }
     var lookupEpoch by remember { mutableIntStateOf(0) }
+    var lastSentence by remember { mutableStateOf<SentenceTarget?>(null) }
+    var lastWord by remember { mutableStateOf<WordTarget?>(null) }
+    LaunchedEffect(sentenceOpen) { if (sentenceOpen != null) lastSentence = sentenceOpen }
+    LaunchedEffect(wordTarget) { if (wordTarget != null) lastWord = wordTarget }
     val savedItem = if (article.id == initial?.articleId) initial.item else 0
     val savedOffset = if (article.id == initial?.articleId) initial.offset else 0
     val listState = remember(article.id) { androidx.compose.foundation.lazy.LazyListState(savedItem, savedOffset) }
@@ -253,40 +259,47 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
             }
         }
 
-        if (drawerOpen) {
-            GlassScrim(colors) { drawerOpen = false }
+        if (drawerOpen) GlassScrim(colors) { drawerOpen = false }
+        AnimatedVisibility(drawerOpen, Modifier.align(Alignment.CenterStart),
+            enter = fadeIn(tween(220)) + slideInHorizontally(tween(340, easing = FastOutSlowInEasing)) { -it / 5 },
+            exit = fadeOut(tween(200)) + slideOutHorizontally(tween(290, easing = FastOutSlowInEasing)) { -it / 5 }) {
             ArticleDrawer(content, store, article.id, lookupEpoch, colors,
-                Modifier.width(width * .80f).fillMaxHeight().align(Alignment.CenterStart),
+                Modifier.width(width * .80f).fillMaxHeight(),
                 onSelect = { index ->
                     articleIndex = index; wordTarget = null; sentenceOpen = null; drawerOpen = false
                     store.savePlace(content.articles[index].id, 0, 0)
                 }, onSettings = { drawerOpen = false; settingsOpen = true })
         }
 
-        val activeSentence = sentenceOpen
+        val activeSentence = sentenceOpen ?: lastSentence
+        if (sentenceOpen != null) GlassScrim(colors) { sentenceOpen = null; wordTarget = null }
         if (activeSentence != null) {
-            GlassScrim(colors) { sentenceOpen = null; wordTarget = null }
             val secondBlur by animateFloatAsState(if (wordTarget?.inSentence == true) 23f else 0f,
                 tween(220), label = "sentence behind word blur")
-            Box(Modifier.fillMaxSize().graphicsLayer {
-                renderEffect = if (secondBlur > .1f) BlurEffect(secondBlur, secondBlur, TileMode.Clamp) else null
-            }) {
-                SentenceSheet(article, activeSentence, sentenceResult, sentenceProgress, sentenceError,
-                    content, store, colors, scale, Modifier.align(Alignment.TopCenter).fillMaxWidth().heightIn(max = height * .82f),
-                    onWord = { token, anchor ->
-                        val absolute = Token(token.text, token.start + activeSentence.sentence.start,
-                            token.end + activeSentence.sentence.start)
-                        wordTarget = WordTarget(activeSentence.paragraphIndex, absolute, anchor, true)
-                    }, onRetry = { retrySentence++ })
-            }
-            if (wordTarget?.inSentence == true) {
-                GlassScrim(colors) { wordTarget = null }
+            AnimatedVisibility(sentenceOpen != null,
+                enter = fadeIn(tween(260)) + slideInVertically(tween(330, easing = FastOutSlowInEasing)) { it / 8 },
+                exit = fadeOut(tween(220)) + slideOutVertically(tween(280, easing = FastOutSlowInEasing)) { -it / 10 }) {
+                Box(Modifier.fillMaxSize().graphicsLayer {
+                    renderEffect = if (secondBlur > .1f) BlurEffect(secondBlur, secondBlur, TileMode.Clamp) else null
+                }) {
+                    SentenceSheet(article, activeSentence, sentenceResult, sentenceProgress, sentenceError,
+                        content, store, colors, scale, Modifier.align(Alignment.TopCenter).fillMaxWidth().heightIn(max = height * .82f),
+                        onWord = { token, anchor ->
+                            val absolute = Token(token.text, token.start + activeSentence.sentence.start,
+                                token.end + activeSentence.sentence.start)
+                            wordTarget = WordTarget(activeSentence.paragraphIndex, absolute, anchor, true)
+                        }, onRetry = { retrySentence++ })
+                }
             }
         }
+        if (wordTarget?.inSentence == true) GlassScrim(colors) { wordTarget = null }
 
-        wordTarget?.let { target ->
-            if (!target.inSentence) GlassScrim(colors) { wordTarget = null }
-            WordSheet(target, article, content, wordResult, wordProgress, wordError, colors,
+        if (wordTarget != null && wordTarget?.inSentence == false) GlassScrim(colors) { wordTarget = null }
+        val displayWord = wordTarget ?: lastWord
+        AnimatedVisibility(wordTarget != null,
+            enter = fadeIn(tween(200)) + slideInVertically(tween(250, easing = FastOutSlowInEasing)) { it / 10 },
+            exit = fadeOut(tween(190)) + slideOutVertically(tween(240, easing = FastOutSlowInEasing)) { -it / 12 }) {
+            if (displayWord != null) WordSheet(displayWord, article, content, wordResult, wordProgress, wordError, colors,
                 maxWidth, maxHeight, onRetry = { retryWord++ }, onConfigure = {
                     wordTarget = null; sentenceOpen = null; settingsOpen = true
                 })
@@ -316,6 +329,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
 private fun readableQueryError(error: Throwable): String = when {
     error is java.net.SocketTimeoutException || error.message?.contains("timeout", ignoreCase = true) == true ->
         "模型等待超时，可能仍在排队或推理。请稍后重试。"
+    error is org.json.JSONException -> "模型结果格式异常，请重试。"
     error.message?.startsWith("模型接口返回 HTTP") == true -> error.message.orEmpty()
     else -> error.message ?: "解析失败，请稍后重试。"
 }
