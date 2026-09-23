@@ -21,6 +21,14 @@ $env:CONTEXTOTO_BUILD_ROOT='E:\ContextoTO-build\output'
 .\gradlew.bat assembleDebug
 ```
 
+模拟器参考比例为 1080×2376、440 dpi，与参考图的 1440×3168 等比。可通过参数调整模拟器尺寸与密度，`-Reset` 恢复默认值；脚本只接受 `emulator-*` 设备：
+
+```powershell
+.\tools\set_emulator_scale.ps1 -Width 1080 -Height 2376 -Density 440
+```
+
+应用内「接口与外观设置」的「正文比例」可分别调整字号（16–28 sp）、行距（125%–200%）、左右边距（12–44 dp）与段落间距（12–72 dp），「参考图」可一键恢复本次截图使用的组合。句子浮层英文原句随字号按 1.12 倍显示。
+
 ## 模型设置与数据
 
 应用默认使用 DeepSeek 官方 OpenAI Chat Completions 接口：`https://api.deepseek.com`、`deepseek-flash`。句子分析使用中等推理强度、单词分析使用较高推理强度。测试环境可在应用设置中切换为 Command Code GOAT；两者的模型 ID 分别配置，不写入 API Key。首次使用在应用内输入自己的密钥，密钥经 Android Keystore 加密后保存在设备上。密钥不会加入仓库或 APK。模型服务不可用时，文章和预置词典仍可离线阅读。
