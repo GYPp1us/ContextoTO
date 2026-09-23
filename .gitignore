@@ -1,0 +1,16 @@
+.gradle/
+.idea/
+.kotlin/
+**/build/
+local.properties
+*.iml
+*.apk
+*.aab
+*.jks
+*.keystore
+*.log
+*.hprof
+.env*
+secrets.properties
+screenshots/
+__pycache__/
