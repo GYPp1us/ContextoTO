@@ -68,6 +68,9 @@ class SecureSettings(private val context: Context) {
     var dark: Boolean
         get() = prefs.getBoolean("dark", true)
         set(value) { prefs.edit().putBoolean("dark", value).apply() }
+    var markQueriedWords: Boolean
+        get() = prefs.getBoolean("mark_queried_words", false)
+        set(value) { prefs.edit().putBoolean("mark_queried_words", value).apply() }
     var bodySize: Float
         get() = prefs.getFloat("body_size", 20f).coerceIn(16f, 28f)
         set(value) { prefs.edit().putFloat("body_size", value.coerceIn(16f, 28f)).apply() }

@@ -10,6 +10,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -37,6 +38,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -58,9 +60,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
@@ -68,6 +72,7 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
@@ -129,6 +134,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     var articleIndex by remember { mutableIntStateOf(content.articles.indexOfFirst { it.id == initial?.articleId }.coerceAtLeast(0)) }
     val article = content.articles[articleIndex]
     var dark by remember { mutableStateOf(settings.dark) }
+    var markQueriedWords by remember { mutableStateOf(settings.markQueriedWords) }
     var scale by remember { mutableStateOf(ReaderScale(settings.bodySize, settings.lineFactor, settings.sideMargin, settings.paragraphGap)) }
     val colors = palette(dark)
     SideEffect {
@@ -159,14 +165,14 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     val wordMotion = remember { Animatable(0f) }
     LaunchedEffect(sentenceOpen) { if (sentenceOpen != null) lastSentence = sentenceOpen }
     LaunchedEffect(wordTarget) { if (wordTarget != null) lastWord = wordTarget }
-    LaunchedEffect(sentenceOpen, sentenceDestination) {
+    LaunchedEffect(sentenceOpen, sentenceDestination.isNotEmpty()) {
         if (sentenceOpen != null && sentenceDestination.isNotEmpty()) {
             sentenceMotion.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
         } else if (sentenceOpen == null) {
             sentenceMotion.animateTo(0f, tween(330, easing = FastOutSlowInEasing))
         }
     }
-    LaunchedEffect(wordTarget, wordDestination) {
+    LaunchedEffect(wordTarget, wordDestination != null) {
         if (wordTarget != null && wordDestination != null) {
             wordMotion.animateTo(1f, tween(420, easing = FastOutSlowInEasing))
         } else if (wordTarget == null) {
@@ -275,9 +281,8 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                         Text("READING / ${articleIndex + 1} OF 48", color = colors.word, fontSize = 11.sp,
                             fontWeight = FontWeight.Bold, letterSpacing = 1.6.sp)
                         Spacer(Modifier.height(10.dp))
-                        Text(article.title, color = colors.ink, fontFamily = ReadingFont,
-                            fontSize = 22.sp, lineHeight = 27.sp, fontWeight = FontWeight.Normal,
-                            maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        Text(smallCapsTitle(article.title, 24f), color = colors.ink, fontFamily = ReadingFont,
+                            fontSize = 24.sp, lineHeight = 30.sp, fontWeight = FontWeight.Normal)
                         Spacer(Modifier.height(28.dp))
                     }
                     itemsIndexed(article.paragraphs) { index, text ->
@@ -290,7 +295,8 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                                 sourceWord.token.start to sourceWord.token.end
                             else -> null
                         }
-                        InteractiveParagraph(text, colors, null, content, store.queriedWords(article.id), scale,
+                        InteractiveParagraph(text, colors, null, content,
+                            if (markQueriedWords) store.queriedWords(article.id) else emptySet(), scale,
                             Modifier.fillMaxWidth().padding(bottom = scale.paragraphGap.dp),
                             onWord = { token, anchor ->
                                 wordDestination = null
@@ -373,9 +379,11 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
 
         if (settingsOpen) {
             GlassScrim(colors) { settingsOpen = false }
-            SettingsSheet(colors, dark, provider, settings,
-                Modifier.align(Alignment.TopCenter).fillMaxWidth().fillMaxHeight(.86f).padding(top = topReserve),
-                onDark = { dark = it; settings.dark = it }, onSave = {
+            SettingsSheet(colors, dark, markQueriedWords, provider, settings,
+                Modifier.align(Alignment.TopCenter).fillMaxSize().statusBarsPadding().padding(top = topReserve),
+                onDark = { dark = it; settings.dark = it },
+                onMarkQueriedWords = { markQueriedWords = it; settings.markQueriedWords = it },
+                onSave = {
                     provider = settings.provider()
                     scale = ReaderScale(settings.bodySize, settings.lineFactor, settings.sideMargin, settings.paragraphGap)
                     settingsOpen = false
@@ -448,7 +456,7 @@ private fun InteractiveParagraph(
 
 @Composable
 private fun MotionGlyphs(source: List<TokenGlyph>, destination: List<TokenGlyph>, progress: Float, active: Boolean) {
-    if (progress >= .999f || (progress <= .001f && !active) || source.isEmpty() || destination.isEmpty()) return
+    if (progress >= 1f || (progress <= .001f && !active) || source.isEmpty() || destination.isEmpty()) return
     val context = androidx.compose.ui.platform.LocalContext.current
     val regular = remember { context.resources.getFont(R.font.tinos_regular) }
     val paint = remember { android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { typeface = regular } }
@@ -470,6 +478,26 @@ private fun MotionGlyphs(source: List<TokenGlyph>, destination: List<TokenGlyph>
     }
 }
 
+@Composable
+private fun RevealElement(order: Int, revealKey: Any, modifier: Modifier = Modifier,
+                          content: @Composable () -> Unit) {
+    val reveal = remember(revealKey) { Animatable(0f) }
+    val liftPx = with(LocalDensity.current) { 12.dp.toPx() }
+    LaunchedEffect(revealKey, order) {
+        val wait = (order * 28).coerceAtMost(280)
+        delay(wait.toLong())
+        reveal.animateTo(1f, tween(400 - wait, easing = FastOutSlowInEasing))
+    }
+    Box(modifier.graphicsLayer {
+        val fraction = reveal.value
+        alpha = fraction
+        scaleX = .70f + .30f * fraction
+        scaleY = .70f + .30f * fraction
+        translationY = -liftPx * (1f - fraction)
+        transformOrigin = TransformOrigin(.5f, 0f)
+    }) { content() }
+}
+
 private fun annotateParagraph(text: String, analysis: JSONObject?, content: Content, queried: Set<String>,
                               colors: Palette, hidden: Pair<Int, Int>?): AnnotatedString =
     buildAnnotatedString {
@@ -489,6 +517,17 @@ private fun annotateParagraph(text: String, analysis: JSONObject?, content: Cont
             addStyle(SpanStyle(color = Color.Transparent), hidden.first, hidden.second)
         }
     }
+
+private fun smallCapsTitle(title: String, fullSize: Float): AnnotatedString = buildAnnotatedString {
+    val firstLetter = title.indexOfFirst { it.isLetter() }
+    title.forEachIndexed { index, char ->
+        val start = length
+        append(if (char.isLowerCase()) char.uppercaseChar() else char)
+        if (char.isLowerCase() && index != firstLetter) {
+            addStyle(SpanStyle(fontSize = (fullSize * .78f).sp), start, length)
+        }
+    }
+}
 
 @Composable
 private fun ArticleDrawer(
@@ -517,8 +556,8 @@ private fun ArticleDrawer(
                         if (article.id == lastId) Text("上次阅读", color = colors.paragraph, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                     Spacer(Modifier.height(5.dp))
-                    Text(article.title, color = colors.ink, fontFamily = ReadingFont, fontSize = 17.sp,
-                        lineHeight = 21.sp, fontWeight = if (article.id == lastId) FontWeight.Bold else FontWeight.Normal,
+                    Text(smallCapsTitle(article.title, 18f), color = colors.ink, fontFamily = ReadingFont, fontSize = 18.sp,
+                        lineHeight = 24.sp, fontWeight = if (article.id == lastId) FontWeight.Bold else FontWeight.Normal,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.height(7.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -547,39 +586,48 @@ private fun SentenceSheet(
     val queried = remember(article.id, result) { store.queriedWords(article.id) }
     Column(modifier.verticalScroll(rememberScrollState())
         .padding(horizontal = 24.dp, vertical = 28.dp)) {
-        Text("SENTENCE / ${article.id.uppercase()}", color = colors.paragraph, fontSize = 11.sp,
-            fontWeight = FontWeight.Bold, letterSpacing = 1.7.sp)
+        RevealElement(0, target) {
+            Text("SENTENCE / ${article.id.uppercase()}", color = colors.paragraph, fontSize = 11.sp,
+                fontWeight = FontWeight.Bold, letterSpacing = 1.7.sp)
+        }
         Spacer(Modifier.height(13.dp))
         InteractiveParagraph(text, colors, result, content, queried,
             scale.copy(bodySize = (scale.bodySize * 1.12f).coerceAtLeast(18f), lineFactor = 1.48f),
-            Modifier.graphicsLayer { alpha = ((motion - .82f) / .18f).coerceIn(0f, 1f) },
+            Modifier.graphicsLayer { alpha = if (motion >= 1f) 1f else 0f },
             onWord = onWord, onLongWord = { _, _ -> }, onGeometry = onGeometry,
             hidden = nestedWord?.let { (it.token.start - target.sentence.start) to
                 (it.token.end - target.sentence.start) })
         Spacer(Modifier.height(25.dp))
-        Column(Modifier.graphicsLayer { alpha = motion }) {
-          if (result != null) {
-            Text("整句释义", color = colors.paragraph, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        if (result != null) {
+            RevealElement(1, result) {
+                Text("整句释义", color = colors.paragraph, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
             Spacer(Modifier.height(8.dp))
-            Text(result.optString("translation_zh"), color = colors.ink, fontSize = 19.sp, lineHeight = 30.sp,
-                fontFamily = FontFamily.Serif)
+            RevealElement(2, result) {
+                Text(result.optString("translation_zh"), color = colors.ink, fontSize = 19.sp, lineHeight = 30.sp,
+                    fontFamily = FontFamily.Serif)
+            }
             val clauses = result.optJSONArray("clauses")
             if (clauses != null && clauses.length() > 0) {
                 Spacer(Modifier.height(25.dp))
-                Text("从句范围", color = colors.paragraph, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                RevealElement(3, result) {
+                    Text("从句范围", color = colors.paragraph, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
                 Spacer(Modifier.height(12.dp))
                 val clauseColors = listOf(colors.word, colors.purple, colors.gold, colors.paragraph)
                 for (i in 0 until clauses.length()) {
                     val clause = clauses.optJSONObject(i) ?: continue
-                    Row(Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
-                        Text("${i + 1}".padStart(2, '0'), color = clauseColors[i % clauseColors.size],
-                            fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text(clause.optString("kind"), color = colors.ink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                            Text(clause.optString("quote"), color = colors.muted, fontFamily = FontFamily.Serif, fontSize = 14.sp,
-                                lineHeight = 19.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            Text(clause.optString("brief_zh"), color = colors.muted, fontSize = 13.sp)
+                    RevealElement(4 + i, result to i, Modifier.fillMaxWidth()) {
+                        Row(Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
+                            Text("${i + 1}".padStart(2, '0'), color = clauseColors[i % clauseColors.size],
+                                fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(clause.optString("kind"), color = colors.ink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                Text(clause.optString("quote"), color = colors.muted, fontFamily = FontFamily.Serif, fontSize = 14.sp,
+                                    lineHeight = 19.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Text(clause.optString("brief_zh"), color = colors.muted, fontSize = 13.sp)
+                            }
                         }
                     }
                 }
@@ -587,23 +635,30 @@ private fun SentenceSheet(
             val glosses = result.optJSONArray("glosses")
             if (glosses != null && glosses.length() > 0) {
                 Spacer(Modifier.height(15.dp))
-                Text("本句词语", color = colors.paragraph, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                RevealElement(6, result) {
+                    Text("本句词语", color = colors.paragraph, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
                 for (i in 0 until glosses.length()) {
                     val item = glosses.optJSONObject(i) ?: continue
                     val word = item.optString("quote")
                     val labels = labelsFor(content.lexeme(word)).joinToString(" · ")
-                    Text("$word  ·  ${item.optString("brief_zh")}  $labels", color = colors.ink,
-                        fontSize = 14.sp, lineHeight = 23.sp)
+                    RevealElement(7 + i, result to (100 + i)) {
+                        Text("$word  ·  ${item.optString("brief_zh")}  $labels", color = colors.ink,
+                            fontSize = 14.sp, lineHeight = 23.sp)
+                    }
                 }
             }
-          } else if (error != null) {
-            Text(error, color = colors.paragraph, fontSize = 14.sp)
-            Text("重试解析 →", Modifier.clickable(onClick = onRetry).padding(top = 12.dp), color = colors.word, fontSize = 14.sp)
-          } else {
-            ProgressBlock(progress, colors)
-          }
-          Spacer(Modifier.height(32.dp))
+        } else if (error != null) {
+            RevealElement(1, error) {
+                Text(error, color = colors.paragraph, fontSize = 14.sp)
+            }
+            RevealElement(2, error) {
+                Text("重试解析 →", Modifier.clickable(onClick = onRetry).padding(top = 12.dp), color = colors.word, fontSize = 14.sp)
+            }
+        } else {
+            RevealElement(1, target) { ProgressBlock(progress, colors) }
         }
+        Spacer(Modifier.height(32.dp))
     }
 }
 
@@ -617,88 +672,129 @@ private fun WordSheet(
     val density = LocalDensity.current
     val panelWidth = screenWidth * .86f
     val x = (screenWidth - panelWidth) / 2
-    val y = (with(density) { target.anchor.rect.top.toDp() } - 25.dp)
-        .coerceIn(topReserve + 10.dp, screenHeight * .41f)
+    val maxSheetHeight = screenHeight - topReserve - 18.dp
+    var measuredHeightPx by remember(target) { mutableIntStateOf(0) }
+    val measuredHeight = with(density) { measuredHeightPx.toDp() }
+    val estimatedHeight = screenHeight * .57f
+    val usedHeight = if (measuredHeightPx > 0) measuredHeight else estimatedHeight
+    val minY = topReserve + 7.dp
+    val maxY = (screenHeight - usedHeight - 10.dp).coerceAtLeast(minY)
+    val desiredY = with(density) { target.anchor.rect.top.toDp() } - 29.dp
+    val targetY = desiredY.coerceIn(minY, maxY)
+    val y by animateDpAsState(targetY, tween(260, easing = FastOutSlowInEasing), label = "word sheet y")
     val lexeme = content.lexeme(target.token.text)
     var titleLayout by remember(target) { mutableStateOf<TextLayoutResult?>(null) }
-    Column(Modifier.offset(x = x, y = y).width(panelWidth).heightIn(max = screenHeight * .57f)
+    Column(Modifier.offset(x = x, y = y).width(panelWidth).heightIn(max = maxSheetHeight)
+        .onSizeChanged { if (measuredHeightPx != it.height) measuredHeightPx = it.height }
         .verticalScroll(rememberScrollState()).padding(horizontal = 5.dp, vertical = 10.dp)) {
-        Text("WORD / ${article.id.uppercase()}", color = colors.word, fontSize = 11.sp,
-            fontWeight = FontWeight.Bold, letterSpacing = 1.7.sp)
+        RevealElement(0, target) {
+            Text("WORD / ${article.id.uppercase()}", color = colors.word, fontSize = 11.sp,
+                fontWeight = FontWeight.Bold, letterSpacing = 1.7.sp)
+        }
         Spacer(Modifier.height(8.dp))
         Text(target.token.text, modifier = Modifier.graphicsLayer {
-            alpha = ((motion - .82f) / .18f).coerceIn(0f, 1f)
+            alpha = if (motion >= 1f) 1f else 0f
         }.onGloballyPositioned { coordinates ->
             val layout = titleLayout ?: return@onGloballyPositioned
             val position = coordinates.positionInRoot()
             val box = layout.getBoundingBox(0)
-            val size = with(density) { 38.sp.toPx() }
+            val size = with(density) { 42.sp.toPx() }
             onTitleGeometry(TokenGlyph(target.token,
                 Rect(position.x + box.left, position.y + box.top,
                     position.x + layout.getBoundingBox(target.token.text.length - 1).right, position.y + box.bottom),
                 position.y + layout.getLineBaseline(0), size, colors.ink))
         }, onTextLayout = { titleLayout = it }, color = colors.ink, fontFamily = ReadingFont,
-            fontSize = 38.sp, lineHeight = 43.sp, fontWeight = FontWeight.Bold)
+            fontSize = 42.sp, lineHeight = 47.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(5.dp))
-        Text(labelsFor(lexeme).joinToString("   ·   ").ifBlank { "语境词" }, color = colors.word,
-            fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = .3.sp)
+        RevealElement(1, target) {
+            Text(labelsFor(lexeme).joinToString("   ·   ").ifBlank { "语境词" }, color = colors.word,
+                fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = .3.sp)
+        }
         Spacer(Modifier.height(25.dp))
         if (result != null) {
             val contextSense = result.optJSONObject("context_sense")
-            Text("01  本句取义", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold,
-                letterSpacing = .7.sp)
+            RevealElement(2, result) {
+                Text("01  本句取义", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                    letterSpacing = .7.sp)
+            }
             Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.Top) {
-                Text(contextSense?.optString("part_of_speech").orEmpty().ifBlank { "语境" }.uppercase(),
-                    color = colors.word, fontFamily = ReadingFont, fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold, modifier = Modifier.width(50.dp).padding(top = 5.dp))
-                Text(contextSense?.optString("zh").orEmpty(), color = colors.ink,
-                    fontFamily = FontFamily.Serif, fontSize = 25.sp, lineHeight = 31.sp, fontWeight = FontWeight.Bold)
+            RevealElement(3, result, Modifier.fillMaxWidth()) {
+                Row(verticalAlignment = Alignment.Top) {
+                    Text(abbreviatePartOfSpeech(contextSense?.optString("part_of_speech").orEmpty().ifBlank { "语境" }),
+                        color = colors.word, fontFamily = ReadingFont, fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold, modifier = Modifier.width(50.dp).padding(top = 5.dp),
+                        maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                    Text(contextSense?.optString("zh").orEmpty(), color = colors.ink,
+                        fontFamily = FontFamily.Serif, fontSize = 23.sp, lineHeight = 29.sp, fontWeight = FontWeight.Bold)
+                }
             }
             val evidence = contextSense?.optString("evidence").orEmpty()
-            if (evidence.isNotBlank()) Text("“$evidence”", color = colors.muted, fontSize = 14.sp,
-                fontFamily = ReadingFont, modifier = Modifier.padding(start = 50.dp, top = 8.dp))
+            if (evidence.isNotBlank()) RevealElement(4, result) {
+                Text("“$evidence”", color = colors.muted, fontSize = 14.sp,
+                    fontFamily = ReadingFont, modifier = Modifier.padding(start = 50.dp, top = 8.dp))
+            }
             Spacer(Modifier.height(27.dp))
         }
         val common = result?.optJSONArray("common_senses")
         val dictionarySenses = lexeme?.let { splitDictionarySenses(it.translation) }.orEmpty()
         if (dictionarySenses.isNotEmpty() || (common != null && common.length() > 0)) {
-            Text("02  ${if (lexeme != null) "预置词典" else "常见义项"}", color = colors.muted,
-                fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = .7.sp)
+            val senseKey = if (lexeme != null) target else result ?: target
+            RevealElement(5, senseKey) {
+                Text("02  ${if (lexeme != null) "预置词典" else "常见义项"}", color = colors.muted,
+                    fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = .7.sp)
+            }
             Spacer(Modifier.height(10.dp))
-            dictionarySenses.forEach { (part, meaning) -> SenseLine(part, meaning, colors) }
+            dictionarySenses.forEachIndexed { index, (part, meaning) ->
+                RevealElement(6 + index, senseKey to index, Modifier.fillMaxWidth()) {
+                    SenseLine(part, meaning, colors)
+                }
+            }
             if (lexeme == null && common != null) {
                 for (i in 0 until common.length()) {
                     val item = common.optJSONObject(i) ?: continue
-                    SenseLine(item.optString("part_of_speech"), item.optString("zh"), colors)
+                    RevealElement(6 + i, senseKey to i, Modifier.fillMaxWidth()) {
+                        SenseLine(item.optString("part_of_speech"), item.optString("zh"), colors)
+                    }
                 }
             }
             Spacer(Modifier.height(22.dp))
         }
         val derivatives = result?.optJSONArray("derivatives")
         if (derivatives != null && derivatives.length() > 0) {
-            Text("03  派生词", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold,
-                letterSpacing = .7.sp)
+            RevealElement(9, result) {
+                Text("03  派生词", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                    letterSpacing = .7.sp)
+            }
             Spacer(Modifier.height(9.dp))
             for (i in 0 until derivatives.length()) {
                 val item = derivatives.optJSONObject(i) ?: continue
-                Row(Modifier.fillMaxWidth().padding(bottom = 9.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(item.optString("word"), color = colors.ink, fontFamily = ReadingFont,
-                        fontSize = 19.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                    Text(item.optString("relation"), color = colors.word, fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold)
+                RevealElement(10 + i, result to i, Modifier.fillMaxWidth()) {
+                    Column {
+                        Row(Modifier.fillMaxWidth().padding(bottom = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(item.optString("word"), color = colors.ink, fontFamily = ReadingFont,
+                                fontSize = 19.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            Text(item.optString("relation"), color = colors.word, fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold)
+                        }
+                        Text(item.optString("zh"), color = colors.muted, fontSize = 12.sp,
+                            modifier = Modifier.padding(start = 12.dp, bottom = 8.dp))
+                    }
                 }
-                Text(item.optString("zh"), color = colors.muted, fontSize = 13.sp,
-                    modifier = Modifier.padding(start = 12.dp, bottom = 8.dp))
             }
         }
-        if (lexeme == null && result == null) Text("不在预置词表中", color = colors.muted, fontSize = 13.sp)
-        if (result == null && error == null) ProgressBlock(progress, colors)
+        if (lexeme == null && result == null) RevealElement(5, target) {
+            Text("不在预置词表中", color = colors.muted, fontSize = 13.sp)
+        }
+        if (result == null && error == null) RevealElement(6, target) { ProgressBlock(progress, colors) }
         if (error != null) {
-            Text(error, color = colors.paragraph, fontSize = 14.sp, lineHeight = 20.sp)
-            Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(22.dp)) {
-                Text("重试 →", Modifier.clickable(onClick = onRetry), color = colors.word, fontSize = 14.sp)
-                Text("设置接口 →", Modifier.clickable(onClick = onConfigure), color = colors.word, fontSize = 14.sp)
+            RevealElement(6, error) {
+                Text(error, color = colors.paragraph, fontSize = 14.sp, lineHeight = 20.sp)
+            }
+            RevealElement(7, error) {
+                Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(22.dp)) {
+                    Text("重试 →", Modifier.clickable(onClick = onRetry), color = colors.word, fontSize = 14.sp)
+                    Text("设置接口 →", Modifier.clickable(onClick = onConfigure), color = colors.word, fontSize = 14.sp)
+                }
             }
         }
     }
@@ -713,10 +809,11 @@ private fun splitDictionarySenses(translation: String): List<Pair<String, String
 @Composable
 private fun SenseLine(part: String, meaning: String, colors: Palette) {
     Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), verticalAlignment = Alignment.Top) {
-        Text(part.ifBlank { "释义" }.uppercase(), color = colors.word, fontFamily = ReadingFont,
-            fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(50.dp).padding(top = 2.dp))
+        Text(abbreviatePartOfSpeech(part.ifBlank { "释义" }), color = colors.word, fontFamily = ReadingFont,
+            fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(50.dp).padding(top = 2.dp),
+            maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
         Text(meaning, color = colors.ink, fontFamily = FontFamily.Serif,
-            fontSize = 17.sp, lineHeight = 23.sp, modifier = Modifier.weight(1f))
+            fontSize = 16.sp, lineHeight = 22.sp, modifier = Modifier.weight(1f))
     }
 }
 
@@ -758,8 +855,8 @@ private fun ProgressBlock(progress: QueryProgress?, colors: Palette) {
 
 @Composable
 private fun SettingsSheet(
-    colors: Palette, dark: Boolean, current: Provider, settings: SecureSettings, modifier: Modifier,
-    onDark: (Boolean) -> Unit, onSave: () -> Unit
+    colors: Palette, dark: Boolean, markQueriedWords: Boolean, current: Provider, settings: SecureSettings, modifier: Modifier,
+    onDark: (Boolean) -> Unit, onMarkQueriedWords: (Boolean) -> Unit, onSave: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
@@ -773,7 +870,9 @@ private fun SettingsSheet(
     var lineFactor by remember { mutableStateOf(settings.lineFactor) }
     var sideMargin by remember { mutableStateOf(settings.sideMargin) }
     var paragraphGap by remember { mutableStateOf(settings.paragraphGap) }
-    Column(modifier.background(colors.sheet).verticalScroll(rememberScrollState()).padding(26.dp)) {
+    Column(modifier) {
+    Column(Modifier.weight(1f).fillMaxWidth().clipToBounds().verticalScroll(rememberScrollState())
+        .padding(start = 26.dp, end = 26.dp, top = 26.dp, bottom = 26.dp)) {
         Text("SETTINGS", color = colors.word, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.6.sp)
         Spacer(Modifier.height(12.dp))
         Text("阅读与连接", color = colors.ink, fontFamily = FontFamily.Serif, fontSize = 28.sp, fontWeight = FontWeight.Bold)
@@ -783,6 +882,16 @@ private fun SettingsSheet(
             Spacer(Modifier.weight(1f))
             Text(if (dark) "ON" else "OFF", color = colors.word, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
+        Spacer(Modifier.height(20.dp))
+        Row(Modifier.fillMaxWidth().clickable { onMarkQueriedWords(!markQueriedWords) },
+            verticalAlignment = Alignment.CenterVertically) {
+            Text("正文标记已查询词", color = colors.ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            Text(if (markQueriedWords) "ON" else "OFF", color = colors.word,
+                fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        }
+        Text("默认关闭；只影响着色，不删除查询记录。", color = colors.muted,
+            fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
         Spacer(Modifier.height(24.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("正文比例", color = colors.ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
@@ -842,8 +951,9 @@ private fun SettingsSheet(
         Spacer(Modifier.height(8.dp))
         Text("密钥仅保存在本机加密存储中；文章片段会发送给所选服务。", color = colors.muted, fontSize = 12.sp,
             lineHeight = 18.sp)
-        Spacer(Modifier.height(28.dp))
-        Text("保存并返回 →", Modifier.fillMaxWidth().background(colors.word.copy(alpha = .18f)).clickable {
+    }
+    Row(Modifier.fillMaxWidth().height(104.dp)
+        .background(colors.glass.copy(alpha = .84f)).clickable {
             settings.providerName = selected
             settings.bodySize = bodySize
             settings.lineFactor = lineFactor
@@ -853,7 +963,16 @@ private fun SettingsSheet(
             if (key.isNotBlank()) settings.saveKey(selected, key)
             key = ""
             onSave()
-        }.padding(vertical = 15.dp, horizontal = 18.dp), color = colors.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+        }.padding(horizontal = 26.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column {
+            Text("SAVE CHANGES", color = colors.word, fontSize = 11.sp,
+                fontWeight = FontWeight.Bold, letterSpacing = 1.6.sp)
+            Spacer(Modifier.height(5.dp))
+            Text("保存并返回", color = colors.ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.weight(1f))
+        Text("→", color = colors.word, fontSize = 23.sp)
+    }
     }
 }
 
@@ -872,7 +991,7 @@ private fun ScaleStepper(label: String, value: String, decrease: () -> Unit, inc
 
 @Composable
 private fun SettingInput(label: String, value: String, colors: Palette, secret: Boolean = false, onChange: (String) -> Unit) {
-    Box(Modifier.fillMaxWidth().background(colors.paper.copy(alpha = .58f)).padding(13.dp)) {
+    Box(Modifier.fillMaxWidth().padding(vertical = 14.dp)) {
         if (value.isBlank()) Text(label, color = colors.muted, fontSize = 14.sp)
         BasicTextField(value, onValueChange = onChange, modifier = Modifier.fillMaxWidth(),
             textStyle = androidx.compose.ui.text.TextStyle(color = colors.ink, fontSize = 14.sp),
