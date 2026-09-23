@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -14,10 +15,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -62,7 +61,11 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -76,14 +79,15 @@ import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
@@ -113,8 +117,9 @@ private fun palette(dark: Boolean) = if (dark) Palette(
     Color(0xFF5D7B72), Color(0xFFA87562), Color(0xFF897999), Color(0xFFA48656)
 )
 
-private data class WordTarget(val paragraphIndex: Int, val token: Token, val anchor: Rect, val inSentence: Boolean)
-private data class SentenceTarget(val paragraphIndex: Int, val sentence: Sentence)
+private data class TokenGlyph(val token: Token, val rect: Rect, val baseline: Float, val sizePx: Float, val color: Color)
+private data class WordTarget(val paragraphIndex: Int, val token: Token, val anchor: TokenGlyph, val inSentence: Boolean)
+private data class SentenceTarget(val paragraphIndex: Int, val sentence: Sentence, val sourceGlyphs: List<TokenGlyph>)
 private data class ReaderScale(val bodySize: Float, val lineFactor: Float, val sideMargin: Float, val paragraphGap: Float)
 
 @Composable
@@ -148,8 +153,26 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     var lookupEpoch by remember { mutableIntStateOf(0) }
     var lastSentence by remember { mutableStateOf<SentenceTarget?>(null) }
     var lastWord by remember { mutableStateOf<WordTarget?>(null) }
+    var sentenceDestination by remember { mutableStateOf<List<TokenGlyph>>(emptyList()) }
+    var wordDestination by remember { mutableStateOf<TokenGlyph?>(null) }
+    val sentenceMotion = remember { Animatable(0f) }
+    val wordMotion = remember { Animatable(0f) }
     LaunchedEffect(sentenceOpen) { if (sentenceOpen != null) lastSentence = sentenceOpen }
     LaunchedEffect(wordTarget) { if (wordTarget != null) lastWord = wordTarget }
+    LaunchedEffect(sentenceOpen, sentenceDestination) {
+        if (sentenceOpen != null && sentenceDestination.isNotEmpty()) {
+            sentenceMotion.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
+        } else if (sentenceOpen == null) {
+            sentenceMotion.animateTo(0f, tween(330, easing = FastOutSlowInEasing))
+        }
+    }
+    LaunchedEffect(wordTarget, wordDestination) {
+        if (wordTarget != null && wordDestination != null) {
+            wordMotion.animateTo(1f, tween(420, easing = FastOutSlowInEasing))
+        } else if (wordTarget == null) {
+            wordMotion.animateTo(0f, tween(310, easing = FastOutSlowInEasing))
+        }
+    }
     val savedItem = if (article.id == initial?.articleId) initial.item else 0
     val savedOffset = if (article.id == initial?.articleId) initial.offset else 0
     val listState = remember(article.id) { androidx.compose.foundation.lazy.LazyListState(savedItem, savedOffset) }
@@ -223,13 +246,21 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         val width = maxWidth
         val height = maxHeight
         val density = LocalDensity.current
+        val topReserve = with(density) { (scale.bodySize * scale.lineFactor * .8f).sp.toDp() }
         val drawerShift by animateFloatAsState(if (drawerOpen) with(density) { (width * .60f).toPx() } else 0f,
             tween(340, easing = FastOutSlowInEasing), label = "drawer shift")
-        Box(Modifier.fillMaxSize().graphicsLayer {
+        Box(Modifier.fillMaxSize().pointerInput(article.id, hasOverlay) {
+            var distance = 0f
+            detectHorizontalDragGestures(onHorizontalDrag = { _, delta -> distance += delta },
+                onDragEnd = {
+                    if (!hasOverlay && abs(distance) > 58f) drawerOpen = true
+                    distance = 0f
+                })
+        }.graphicsLayer {
             translationX = drawerShift
             renderEffect = if (blur > 0.1f) BlurEffect(blur, blur, TileMode.Clamp) else null
         }) {
-            Column(Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxSize().padding(top = topReserve)) {
                 Row(Modifier.fillMaxWidth().padding(start = scale.sideMargin.dp, end = scale.sideMargin.dp, top = 22.dp, bottom = 18.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Text("≡", Modifier.clickable { drawerOpen = true }.padding(end = 18.dp), color = colors.ink, fontSize = 27.sp)
@@ -250,21 +281,40 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                         Spacer(Modifier.height(28.dp))
                     }
                     itemsIndexed(article.paragraphs) { index, text ->
+                        val sourceSentence = sentenceOpen ?: lastSentence.takeIf { sentenceMotion.value > .001f }
+                        val sourceWord = wordTarget ?: lastWord.takeIf { wordMotion.value > .001f }
+                        val hidden = when {
+                            sourceSentence?.paragraphIndex == index ->
+                                sourceSentence.sentence.start to sourceSentence.sentence.end
+                            sourceWord?.paragraphIndex == index && !sourceWord.inSentence ->
+                                sourceWord.token.start to sourceWord.token.end
+                            else -> null
+                        }
                         InteractiveParagraph(text, colors, null, content, store.queriedWords(article.id), scale,
                             Modifier.fillMaxWidth().padding(bottom = scale.paragraphGap.dp),
-                            onWord = { token, anchor -> wordTarget = WordTarget(index, token, anchor, false) },
-                            onLongWord = { token -> sentenceOpen = SentenceTarget(index, Content.sentenceAt(text, token.start)) })
+                            onWord = { token, anchor ->
+                                wordDestination = null
+                                wordTarget = WordTarget(index, token, anchor, false)
+                            },
+                            onLongWord = { token, glyphs ->
+                                val sentence = Content.sentenceAt(text, token.start)
+                                sentenceDestination = emptyList()
+                                sentenceOpen = SentenceTarget(index, sentence, glyphs.map { glyph ->
+                                    glyph.copy(token = glyph.token.copy(
+                                        start = glyph.token.start - sentence.start,
+                                        end = glyph.token.end - sentence.start))
+                                })
+                            }, hidden = hidden)
                     }
                 }
             }
         }
-
         if (drawerOpen) GlassScrim(colors) { drawerOpen = false }
         AnimatedVisibility(drawerOpen, Modifier.align(Alignment.CenterStart),
             enter = fadeIn(tween(220)) + slideInHorizontally(tween(340, easing = FastOutSlowInEasing)) { -it / 5 },
             exit = fadeOut(tween(200)) + slideOutHorizontally(tween(290, easing = FastOutSlowInEasing)) { -it / 5 }) {
             ArticleDrawer(content, store, article.id, lookupEpoch, colors,
-                Modifier.width(width * .80f).fillMaxHeight(),
+                Modifier.width(width * .80f).fillMaxHeight().padding(top = topReserve),
                 onSelect = { index ->
                     articleIndex = index; wordTarget = null; sentenceOpen = null; drawerOpen = false
                     store.savePlace(content.articles[index].id, 0, 0)
@@ -274,19 +324,26 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         val activeSentence = sentenceOpen ?: lastSentence
         if (sentenceOpen != null) GlassScrim(colors) { sentenceOpen = null; wordTarget = null }
         if (activeSentence != null) {
+            val sourceTop = activeSentence.sourceGlyphs.minOfOrNull { it.rect.top } ?: 0f
+            val sentenceY = (with(density) { sourceTop.toDp() } - 66.dp)
+                .coerceIn(topReserve + 8.dp, height * .58f)
             val secondBlur by animateFloatAsState(if (wordTarget?.inSentence == true) 23f else 0f,
                 tween(220), label = "sentence behind word blur")
             AnimatedVisibility(sentenceOpen != null,
-                enter = fadeIn(tween(260)) + slideInVertically(tween(330, easing = FastOutSlowInEasing)) { it / 8 },
-                exit = fadeOut(tween(220)) + slideOutVertically(tween(280, easing = FastOutSlowInEasing)) { -it / 10 }) {
+                enter = fadeIn(tween(220)), exit = fadeOut(tween(340))) {
                 Box(Modifier.fillMaxSize().graphicsLayer {
                     renderEffect = if (secondBlur > .1f) BlurEffect(secondBlur, secondBlur, TileMode.Clamp) else null
                 }) {
                     SentenceSheet(article, activeSentence, sentenceResult, sentenceProgress, sentenceError,
-                        content, store, colors, scale, Modifier.align(Alignment.TopCenter).fillMaxWidth().heightIn(max = height * .82f),
+                        content, store, colors, scale, sentenceMotion.value,
+                        (wordTarget ?: lastWord.takeIf { wordMotion.value > .001f })?.takeIf { it.inSentence },
+                        Modifier.align(Alignment.TopCenter).offset(y = sentenceY).fillMaxWidth()
+                            .heightIn(max = height - sentenceY - 18.dp),
+                        onGeometry = { sentenceDestination = it },
                         onWord = { token, anchor ->
                             val absolute = Token(token.text, token.start + activeSentence.sentence.start,
                                 token.end + activeSentence.sentence.start)
+                            wordDestination = null
                             wordTarget = WordTarget(activeSentence.paragraphIndex, absolute, anchor, true)
                         }, onRetry = { retrySentence++ })
                 }
@@ -297,17 +354,27 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         if (wordTarget != null && wordTarget?.inSentence == false) GlassScrim(colors) { wordTarget = null }
         val displayWord = wordTarget ?: lastWord
         AnimatedVisibility(wordTarget != null,
-            enter = fadeIn(tween(200)) + slideInVertically(tween(250, easing = FastOutSlowInEasing)) { it / 10 },
-            exit = fadeOut(tween(190)) + slideOutVertically(tween(240, easing = FastOutSlowInEasing)) { -it / 12 }) {
+            enter = fadeIn(tween(160)), exit = fadeOut(tween(310))) {
             if (displayWord != null) WordSheet(displayWord, article, content, wordResult, wordProgress, wordError, colors,
-                maxWidth, maxHeight, onRetry = { retryWord++ }, onConfigure = {
+                maxWidth, maxHeight, topReserve, wordMotion.value, onTitleGeometry = { wordDestination = it },
+                onRetry = { retryWord++ }, onConfigure = {
                     wordTarget = null; sentenceOpen = null; settingsOpen = true
                 })
         }
 
+        val flightSentence = sentenceOpen ?: lastSentence
+        if (flightSentence != null && sentenceDestination.isNotEmpty()) {
+            MotionGlyphs(flightSentence.sourceGlyphs, sentenceDestination, sentenceMotion.value, sentenceOpen != null)
+        }
+        val flightWord = wordTarget ?: lastWord
+        if (flightWord != null && wordDestination != null) {
+            MotionGlyphs(listOf(flightWord.anchor), listOf(wordDestination!!), wordMotion.value, wordTarget != null)
+        }
+
         if (settingsOpen) {
             GlassScrim(colors) { settingsOpen = false }
-            SettingsSheet(colors, dark, provider, settings, Modifier.align(Alignment.TopCenter).fillMaxWidth().fillMaxHeight(.86f),
+            SettingsSheet(colors, dark, provider, settings,
+                Modifier.align(Alignment.TopCenter).fillMaxWidth().fillMaxHeight(.86f).padding(top = topReserve),
                 onDark = { dark = it; settings.dark = it }, onSave = {
                     provider = settings.provider()
                     scale = ReaderScale(settings.bodySize, settings.lineFactor, settings.sideMargin, settings.paragraphGap)
@@ -315,14 +382,6 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                 })
         }
 
-        if (!hasOverlay) {
-            Box(Modifier.fillMaxHeight().width(22.dp).align(Alignment.CenterStart)
-                .pointerInput(article.id) {
-                    var distance = 0f
-                    detectHorizontalDragGestures(onHorizontalDrag = { _, delta -> distance += delta },
-                        onDragEnd = { if (distance > 55f) drawerOpen = true; distance = 0f })
-                })
-        }
     }
 }
 
@@ -342,12 +401,29 @@ private fun GlassScrim(colors: Palette, onDismiss: () -> Unit) {
 @Composable
 private fun InteractiveParagraph(
     text: String, colors: Palette, analysis: JSONObject?, content: Content, queried: Set<String>,
-    scale: ReaderScale, modifier: Modifier = Modifier, onWord: (Token, Rect) -> Unit, onLongWord: (Token) -> Unit
+    scale: ReaderScale, modifier: Modifier = Modifier, onWord: (Token, TokenGlyph) -> Unit,
+    onLongWord: (Token, List<TokenGlyph>) -> Unit,
+    onGeometry: ((List<TokenGlyph>) -> Unit)? = null, hidden: Pair<Int, Int>? = null
 ) {
     var result by remember(text) { mutableStateOf<TextLayoutResult?>(null) }
     var position by remember(text) { mutableStateOf(Offset.Zero) }
-    val annotated = remember(text, analysis, queried, colors) { annotateParagraph(text, analysis, content, queried, colors) }
-    Text(annotated, modifier.onGloballyPositioned { position = it.positionInRoot() }
+    val fontPx = with(LocalDensity.current) { scale.bodySize.sp.toPx() }
+    val annotated = remember(text, analysis, queried, colors, hidden) {
+        annotateParagraph(text, analysis, content, queried, colors, hidden)
+    }
+    fun glyph(token: Token, layout: TextLayoutResult): TokenGlyph {
+        val first = layout.getBoundingBox(token.start)
+        val last = layout.getBoundingBox(token.end - 1)
+        val style = annotated.spanStyles.lastOrNull { token.start in it.start until it.end }
+        return TokenGlyph(token, Rect(first.left + position.x, first.top + position.y,
+            last.right + position.x, first.bottom + position.y),
+            layout.getLineBaseline(layout.getLineForOffset(token.start)) + position.y,
+            fontPx, style?.item?.color ?: colors.ink)
+    }
+    Text(annotated, modifier.onGloballyPositioned {
+        position = it.positionInRoot()
+        result?.let { layout -> onGeometry?.invoke(Content.tokens(text).map { token -> glyph(token, layout) }) }
+    }
         .pointerInput(text, result) {
             detectTapGestures(
                 onTap = { point ->
@@ -355,20 +431,47 @@ private fun InteractiveParagraph(
                     val token = Content.tokenAt(text, layout.getOffsetForPosition(point)) ?: return@detectTapGestures
                     val box = layout.getBoundingBox(token.start)
                     if (point.y >= box.top - 5 && point.y <= box.bottom + 5) {
-                        onWord(token, Rect(box.left + position.x, box.top + position.y,
-                            layout.getBoundingBox(token.end - 1).right + position.x, box.bottom + position.y))
+                        onWord(token, glyph(token, layout))
                     }
                 },
                 onLongPress = { point ->
                     val layout = result ?: return@detectTapGestures
-                    Content.tokenAt(text, layout.getOffsetForPosition(point))?.let(onLongWord)
+                    val token = Content.tokenAt(text, layout.getOffsetForPosition(point)) ?: return@detectTapGestures
+                    val sentence = Content.sentenceAt(text, token.start)
+                    onLongWord(token, Content.tokens(text).filter { it.start >= sentence.start && it.end <= sentence.end }
+                        .map { glyph(it, layout) })
                 }
             )
         }, onTextLayout = { result = it }, color = colors.ink, fontFamily = ReadingFont,
         fontSize = scale.bodySize.sp, lineHeight = (scale.bodySize * scale.lineFactor).sp)
 }
 
-private fun annotateParagraph(text: String, analysis: JSONObject?, content: Content, queried: Set<String>, colors: Palette): AnnotatedString =
+@Composable
+private fun MotionGlyphs(source: List<TokenGlyph>, destination: List<TokenGlyph>, progress: Float, active: Boolean) {
+    if (progress >= .999f || (progress <= .001f && !active) || source.isEmpty() || destination.isEmpty()) return
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val regular = remember { context.resources.getFont(R.font.tinos_regular) }
+    val paint = remember { android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { typeface = regular } }
+    Canvas(Modifier.fillMaxSize()) {
+        drawIntoCanvas { canvas ->
+            val targetByStart = destination.associateBy { it.token.start }
+            source.forEachIndexed { index, from ->
+                val to = targetByStart[from.token.start] ?: return@forEachIndexed
+                val stagger = (index * .018f).coerceAtMost(.25f)
+                val t = ((progress - stagger) / (1f - stagger)).coerceIn(0f, 1f)
+                paint.color = lerp(from.color, to.color, t).toArgb()
+                paint.alpha = (255f * (1f - .12f * t)).roundToInt()
+                paint.textSize = from.sizePx + (to.sizePx - from.sizePx) * t
+                canvas.nativeCanvas.drawText(from.token.text,
+                    from.rect.left + (to.rect.left - from.rect.left) * t,
+                    from.baseline + (to.baseline - from.baseline) * t, paint)
+            }
+        }
+    }
+}
+
+private fun annotateParagraph(text: String, analysis: JSONObject?, content: Content, queried: Set<String>,
+                              colors: Palette, hidden: Pair<Int, Int>?): AnnotatedString =
     buildAnnotatedString {
         append(text)
         val clauses = analysis?.optJSONArray("clauses")
@@ -381,6 +484,9 @@ private fun annotateParagraph(text: String, analysis: JSONObject?, content: Cont
         for (token in Content.tokens(text)) {
             val lemma = content.lemma(token.text)
             if (lemma in queried) addStyle(SpanStyle(color = colors.paragraph, fontWeight = FontWeight.Bold), token.start, token.end)
+        }
+        if (hidden != null && hidden.first in 0 until hidden.second && hidden.second <= text.length) {
+            addStyle(SpanStyle(color = Color.Transparent), hidden.first, hidden.second)
         }
     }
 
@@ -433,8 +539,9 @@ private fun ArticleDrawer(
 @Composable
 private fun SentenceSheet(
     article: Article, target: SentenceTarget, result: JSONObject?, progress: QueryProgress?, error: String?,
-    content: Content, store: UserStore, colors: Palette, scale: ReaderScale, modifier: Modifier,
-    onWord: (Token, Rect) -> Unit, onRetry: () -> Unit
+    content: Content, store: UserStore, colors: Palette, scale: ReaderScale, motion: Float,
+    nestedWord: WordTarget?, modifier: Modifier,
+    onGeometry: (List<TokenGlyph>) -> Unit, onWord: (Token, TokenGlyph) -> Unit, onRetry: () -> Unit
 ) {
     val text = target.sentence.text
     val queried = remember(article.id, result) { store.queriedWords(article.id) }
@@ -445,8 +552,12 @@ private fun SentenceSheet(
         Spacer(Modifier.height(13.dp))
         InteractiveParagraph(text, colors, result, content, queried,
             scale.copy(bodySize = (scale.bodySize * 1.12f).coerceAtLeast(18f), lineFactor = 1.48f),
-            onWord = onWord, onLongWord = {})
+            Modifier.graphicsLayer { alpha = ((motion - .82f) / .18f).coerceIn(0f, 1f) },
+            onWord = onWord, onLongWord = { _, _ -> }, onGeometry = onGeometry,
+            hidden = nestedWord?.let { (it.token.start - target.sentence.start) to
+                (it.token.end - target.sentence.start) })
         Spacer(Modifier.height(25.dp))
+        Column(Modifier.graphicsLayer { alpha = motion }) {
           if (result != null) {
             Text("整句释义", color = colors.paragraph, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
@@ -492,6 +603,7 @@ private fun SentenceSheet(
             ProgressBlock(progress, colors)
           }
           Spacer(Modifier.height(32.dp))
+        }
     }
 }
 
@@ -499,53 +611,88 @@ private fun SentenceSheet(
 private fun WordSheet(
     target: WordTarget, article: Article, content: Content, result: JSONObject?, progress: QueryProgress?,
     error: String?, colors: Palette, screenWidth: androidx.compose.ui.unit.Dp, screenHeight: androidx.compose.ui.unit.Dp,
+    topReserve: androidx.compose.ui.unit.Dp, motion: Float, onTitleGeometry: (TokenGlyph) -> Unit,
     onRetry: () -> Unit, onConfigure: () -> Unit
 ) {
     val density = LocalDensity.current
-    val panelWidth = screenWidth * .88f
-    val x = with(density) { target.anchor.left.toDp() }.coerceIn(12.dp, screenWidth - panelWidth - 12.dp)
-    val top = with(density) { target.anchor.bottom.toDp() + 10.dp }
-    val y = if (top > screenHeight * .51f) (with(density) { target.anchor.top.toDp() } - screenHeight * .50f).coerceAtLeast(12.dp) else top
+    val panelWidth = screenWidth * .86f
+    val x = (screenWidth - panelWidth) / 2
+    val y = (with(density) { target.anchor.rect.top.toDp() } - 25.dp)
+        .coerceIn(topReserve + 10.dp, screenHeight * .41f)
     val lexeme = content.lexeme(target.token.text)
-    Column(Modifier.offset(x = x, y = y).width(panelWidth).heightIn(max = screenHeight * .56f).background(colors.sheet)
-        .verticalScroll(rememberScrollState()).padding(horizontal = 22.dp, vertical = 20.dp)) {
-        Text(target.token.text, color = colors.ink, fontFamily = ReadingFont, fontSize = 34.sp,
-            lineHeight = 39.sp, fontWeight = FontWeight.Bold)
+    var titleLayout by remember(target) { mutableStateOf<TextLayoutResult?>(null) }
+    Column(Modifier.offset(x = x, y = y).width(panelWidth).heightIn(max = screenHeight * .57f)
+        .verticalScroll(rememberScrollState()).padding(horizontal = 5.dp, vertical = 10.dp)) {
+        Text("WORD / ${article.id.uppercase()}", color = colors.word, fontSize = 11.sp,
+            fontWeight = FontWeight.Bold, letterSpacing = 1.7.sp)
+        Spacer(Modifier.height(8.dp))
+        Text(target.token.text, modifier = Modifier.graphicsLayer {
+            alpha = ((motion - .82f) / .18f).coerceIn(0f, 1f)
+        }.onGloballyPositioned { coordinates ->
+            val layout = titleLayout ?: return@onGloballyPositioned
+            val position = coordinates.positionInRoot()
+            val box = layout.getBoundingBox(0)
+            val size = with(density) { 38.sp.toPx() }
+            onTitleGeometry(TokenGlyph(target.token,
+                Rect(position.x + box.left, position.y + box.top,
+                    position.x + layout.getBoundingBox(target.token.text.length - 1).right, position.y + box.bottom),
+                position.y + layout.getLineBaseline(0), size, colors.ink))
+        }, onTextLayout = { titleLayout = it }, color = colors.ink, fontFamily = ReadingFont,
+            fontSize = 38.sp, lineHeight = 43.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(5.dp))
-        Text(labelsFor(lexeme).joinToString("  /  ").ifBlank { "语境词" }, color = colors.word,
-            fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = .5.sp)
-        Spacer(Modifier.height(18.dp))
+        Text(labelsFor(lexeme).joinToString("   ·   ").ifBlank { "语境词" }, color = colors.word,
+            fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = .3.sp)
+        Spacer(Modifier.height(25.dp))
         if (result != null) {
-            Text("本句取义", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            Text(result.optJSONObject("context_sense")?.optString("zh").orEmpty(), color = colors.ink,
-                fontFamily = FontFamily.Serif, fontSize = 25.sp, lineHeight = 31.sp, fontWeight = FontWeight.Bold)
-            val evidence = result.optJSONObject("context_sense")?.optString("evidence").orEmpty()
-            if (evidence.isNotBlank()) Text(evidence, color = colors.word, fontSize = 13.sp, fontFamily = ReadingFont)
-            Spacer(Modifier.height(18.dp))
-        }
-        if (lexeme != null) {
-            Text("预置词典 · 其他义项", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            Text(lexeme.translation, color = colors.ink, fontFamily = FontFamily.Serif, fontSize = 15.sp, lineHeight = 22.sp)
-            Spacer(Modifier.height(16.dp))
+            val contextSense = result.optJSONObject("context_sense")
+            Text("01  本句取义", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                letterSpacing = .7.sp)
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.Top) {
+                Text(contextSense?.optString("part_of_speech").orEmpty().ifBlank { "语境" }.uppercase(),
+                    color = colors.word, fontFamily = ReadingFont, fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold, modifier = Modifier.width(50.dp).padding(top = 5.dp))
+                Text(contextSense?.optString("zh").orEmpty(), color = colors.ink,
+                    fontFamily = FontFamily.Serif, fontSize = 25.sp, lineHeight = 31.sp, fontWeight = FontWeight.Bold)
+            }
+            val evidence = contextSense?.optString("evidence").orEmpty()
+            if (evidence.isNotBlank()) Text("“$evidence”", color = colors.muted, fontSize = 14.sp,
+                fontFamily = ReadingFont, modifier = Modifier.padding(start = 50.dp, top = 8.dp))
+            Spacer(Modifier.height(27.dp))
         }
         val common = result?.optJSONArray("common_senses")
-        if (lexeme == null && common != null && common.length() > 0) {
-            Text("常见义项", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            for (i in 0 until common.length()) {
-                val item = common.optJSONObject(i) ?: continue
-                Text("${item.optString("part_of_speech")}  ${item.optString("zh")}", color = colors.ink, fontSize = 14.sp)
+        val dictionarySenses = lexeme?.let { splitDictionarySenses(it.translation) }.orEmpty()
+        if (dictionarySenses.isNotEmpty() || (common != null && common.length() > 0)) {
+            Text("02  ${if (lexeme != null) "预置词典" else "常见义项"}", color = colors.muted,
+                fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = .7.sp)
+            Spacer(Modifier.height(10.dp))
+            dictionarySenses.forEach { (part, meaning) -> SenseLine(part, meaning, colors) }
+            if (lexeme == null && common != null) {
+                for (i in 0 until common.length()) {
+                    val item = common.optJSONObject(i) ?: continue
+                    SenseLine(item.optString("part_of_speech"), item.optString("zh"), colors)
+                }
             }
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(22.dp))
         }
         val derivatives = result?.optJSONArray("derivatives")
         if (derivatives != null && derivatives.length() > 0) {
-            Text("派生词", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text("03  派生词", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                letterSpacing = .7.sp)
+            Spacer(Modifier.height(9.dp))
             for (i in 0 until derivatives.length()) {
                 val item = derivatives.optJSONObject(i) ?: continue
-                Text("${item.optString("word")}  ·  ${item.optString("relation")}  ${item.optString("zh")}",
-                    color = colors.ink, fontSize = 14.sp, lineHeight = 22.sp)
+                Row(Modifier.fillMaxWidth().padding(bottom = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(item.optString("word"), color = colors.ink, fontFamily = ReadingFont,
+                        fontSize = 19.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Text(item.optString("relation"), color = colors.word, fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold)
+                }
+                Text(item.optString("zh"), color = colors.muted, fontSize = 13.sp,
+                    modifier = Modifier.padding(start = 12.dp, bottom = 8.dp))
             }
         }
+        if (lexeme == null && result == null) Text("不在预置词表中", color = colors.muted, fontSize = 13.sp)
         if (result == null && error == null) ProgressBlock(progress, colors)
         if (error != null) {
             Text(error, color = colors.paragraph, fontSize = 14.sp, lineHeight = 20.sp)
@@ -554,6 +701,22 @@ private fun WordSheet(
                 Text("设置接口 →", Modifier.clickable(onClick = onConfigure), color = colors.word, fontSize = 14.sp)
             }
         }
+    }
+}
+
+private fun splitDictionarySenses(translation: String): List<Pair<String, String>> =
+    translation.split(Regex("\\s*/\\s*")).filter { it.isNotBlank() }.map { sense ->
+        val parts = Regex("^([a-z]{1,5}\\.|\\[[^]]+])\\s*(.*)", RegexOption.IGNORE_CASE).find(sense.trim())
+        if (parts == null) "释义" to sense.trim() else parts.groupValues[1] to parts.groupValues[2]
+    }
+
+@Composable
+private fun SenseLine(part: String, meaning: String, colors: Palette) {
+    Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), verticalAlignment = Alignment.Top) {
+        Text(part.ifBlank { "释义" }.uppercase(), color = colors.word, fontFamily = ReadingFont,
+            fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(50.dp).padding(top = 2.dp))
+        Text(meaning, color = colors.ink, fontFamily = FontFamily.Serif,
+            fontSize = 17.sp, lineHeight = 23.sp, modifier = Modifier.weight(1f))
     }
 }
 
@@ -598,6 +761,10 @@ private fun SettingsSheet(
     colors: Palette, dark: Boolean, current: Provider, settings: SecureSettings, modifier: Modifier,
     onDark: (Boolean) -> Unit, onSave: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var updateStatus by remember { mutableStateOf("点击检查 GitHub 正式版") }
+    var updateUrl by remember { mutableStateOf<String?>(null) }
     var selected by remember { mutableStateOf(current.name) }
     var key by remember(selected) { mutableStateOf("") }
     var url by remember { mutableStateOf(settings.customBaseUrl) }
@@ -634,6 +801,29 @@ private fun SettingsSheet(
         ScaleStepper("段落间距", "${paragraphGap.roundToInt()} dp", { paragraphGap = (paragraphGap - 4f).coerceAtLeast(12f) },
             { paragraphGap = (paragraphGap + 4f).coerceAtMost(72f) }, colors)
         Spacer(Modifier.height(22.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("应用更新", color = colors.ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            Text("检查更新 →", Modifier.clickable {
+                scope.launch {
+                    updateStatus = "正在检查…"
+                    updateUrl = null
+                    runCatching { UpdateChecker.check() }.onSuccess { info ->
+                        updateStatus = if (info.available) "发现 ${info.latest}，点击前往下载"
+                            else "已是最新版本 · v${info.current}"
+                        if (info.available) updateUrl = info.url
+                    }.onFailure { updateStatus = it.message ?: "检查失败，请检查网络" }
+                }
+            }, color = colors.word, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        }
+        Text(updateStatus, Modifier.fillMaxWidth().clickable(enabled = updateUrl != null) {
+            updateUrl?.let { url ->
+                context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse(url)))
+            }
+        }.padding(top = 7.dp), color = if (updateUrl == null) colors.muted else colors.word,
+            fontSize = 12.sp, lineHeight = 18.sp)
+        Spacer(Modifier.height(24.dp))
         Text("模型服务", color = colors.muted, fontSize = 12.sp)
         listOf("DeepSeek 官方", "Command Code GOAT", "自定义").forEach { name ->
             Text(if (selected == name) "●  $name" else "○  $name", Modifier.fillMaxWidth().clickable { selected = name }
