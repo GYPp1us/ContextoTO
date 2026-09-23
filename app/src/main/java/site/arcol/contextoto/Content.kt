@@ -54,6 +54,23 @@ class Content(context: Context) {
         private val wordPattern = Regex("[A-Za-z]+(?:['’][A-Za-z]+)?(?:-[A-Za-z]+)*")
         fun tokens(text: String): List<Token> = wordPattern.findAll(text).map { Token(it.value, it.range.first, it.range.last + 1) }.toList()
         fun tokenAt(text: String, offset: Int): Token? = tokens(text).firstOrNull { offset in it.start until it.end }
+        fun sentences(text: String): List<Sentence> {
+            val iterator = BreakIterator.getSentenceInstance(Locale.US)
+            iterator.setText(text)
+            val result = mutableListOf<Sentence>()
+            var start = iterator.first()
+            var end = iterator.next()
+            while (end != BreakIterator.DONE) {
+                var trimmedStart = start
+                var trimmedEnd = end
+                while (trimmedStart < trimmedEnd && text[trimmedStart].isWhitespace()) trimmedStart++
+                while (trimmedEnd > trimmedStart && text[trimmedEnd - 1].isWhitespace()) trimmedEnd--
+                if (trimmedEnd > trimmedStart) result += Sentence(text.substring(trimmedStart, trimmedEnd), trimmedStart, trimmedEnd)
+                start = end
+                end = iterator.next()
+            }
+            return result
+        }
         fun sentenceAt(text: String, offset: Int): Sentence {
             val iterator = BreakIterator.getSentenceInstance(Locale.US)
             iterator.setText(text)

@@ -1,17 +1,22 @@
 package site.arcol.contextoto
 
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 enum class QueryPhase { CONTEXT, FIRST, STREAM, COMPLETE }
 data class QueryProgress(val phase: QueryPhase, val approximateReasoningTokens: Int = 0, val receivedChars: Int = 0, val exactReasoningTokens: Int? = null)
@@ -25,16 +30,20 @@ class AnalysisEngine(private val content: Content, private val store: UserStore)
     private fun cacheId(kind: String, provider: Provider, source: String): String =
         Content.sha256("$promptVersion|$kind|${provider.baseUrl}|${provider.model}|$source")
 
-    fun cachedSentence(provider: Provider, sentence: String): JSONObject? = store.getAnalysis(
+    private fun parsedAnalysis(key: String): JSONObject? = store.getAnalysis(key)?.let { raw ->
+        runCatching { JSONObject(raw) }.getOrNull()
+    }
+
+    fun cachedSentence(provider: Provider, sentence: String): JSONObject? = parsedAnalysis(
         cacheId("sentence", provider, sentence)
-    )?.let(::JSONObject)
+    )
 
     fun cachedWord(provider: Provider, paragraph: String, token: Token): JSONObject? {
         val lemma = content.lemma(token.text)
         val contextualKey = cacheId("word-context", provider, "$lemma|$paragraph|${token.start}")
-        val contextJson = store.getAnalysis(contextualKey) ?: return null
+        val contextJson = parsedAnalysis(contextualKey) ?: return null
         val commonKey = cacheId("word-common", provider, lemma)
-        return mergeWord(JSONObject(contextJson), store.getAnalysis(commonKey)?.let(::JSONObject))
+        return mergeWord(contextJson, parsedAnalysis(commonKey))
     }
 
     suspend fun sentence(
@@ -42,10 +51,10 @@ class AnalysisEngine(private val content: Content, private val store: UserStore)
     ): JSONObject {
         val text = sentence.text
         val key = cacheId("sentence", provider, text)
-        store.getAnalysis(key)?.let { return JSONObject(it) }
+        parsedAnalysis(key)?.let { return it }
         val lock = locks.getOrPut(key) { Mutex() }
         return lock.withLock {
-            store.getAnalysis(key)?.let { return@withLock JSONObject(it) }
+            parsedAnalysis(key)?.let { return@withLock it }
             onProgress(QueryProgress(QueryPhase.CONTEXT))
             val matched = Content.tokens(text).mapNotNull { token ->
                 content.lexeme(token.text)?.let { "${token.text}@${token.start}" }
@@ -80,7 +89,7 @@ class AnalysisEngine(private val content: Content, private val store: UserStore)
             cachedWord(provider, paragraph, token)?.let { return@withLock it }
             onProgress(QueryProgress(QueryPhase.CONTEXT))
             val commonKey = cacheId("word-common", provider, lemma)
-            val common = store.getAnalysis(commonKey)?.let(::JSONObject)
+            val common = parsedAnalysis(commonKey)
             val sentence = Content.sentenceAt(paragraph, token.start)
             val lexeme = content.lexeme(token.text)
             val instruction = """
@@ -133,7 +142,7 @@ class AnalysisEngine(private val content: Content, private val store: UserStore)
 
     private suspend fun request(
         provider: Provider, system: String, user: String, effort: String, onProgress: (QueryProgress) -> Unit
-    ): StreamResult = withContext(Dispatchers.IO) {
+    ): StreamResult {
         require(provider.key.isNotBlank()) { "请先在设置中填写 API Key" }
         require(provider.baseUrl.startsWith("https://")) { "接口地址必须使用 HTTPS" }
         val body = JSONObject().put("model", provider.model)
@@ -149,15 +158,35 @@ class AnalysisEngine(private val content: Content, private val store: UserStore)
             .header("Accept", "text/event-stream")
             .post(body.toString().toRequestBody("application/json; charset=utf-8".toMediaType())).build()
         onProgress(QueryProgress(QueryPhase.FIRST))
-        val response = client.newCall(request).execute()
-        response.use { http ->
+        return suspendCancellableCoroutine { continuation ->
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, error: IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(error)
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    try {
+                        val parsed = response.use { http -> parseStream(http, onProgress) }
+                        if (continuation.isActive) continuation.resume(parsed)
+                    } catch (error: Exception) {
+                        if (continuation.isActive) continuation.resumeWithException(error)
+                    }
+                }
+            })
+        }
+    }
+
+    private fun parseStream(http: Response, onProgress: (QueryProgress) -> Unit): StreamResult {
             if (!http.isSuccessful) throw IllegalStateException("模型接口返回 HTTP ${http.code}")
             val source = http.body?.source() ?: throw IllegalStateException("模型没有返回内容")
             val output = StringBuilder()
             var reasoningChars = 0
             var exactTokens: Int? = null
             var lastReport = 0
-            while (!source.exhausted()) {
+            while (true) {
+                if (source.exhausted()) break
                 val line = source.readUtf8Line() ?: break
                 if (!line.startsWith("data:")) continue
                 val data = line.removePrefix("data:").trim()
@@ -179,7 +208,6 @@ class AnalysisEngine(private val content: Content, private val store: UserStore)
             }
             require(output.isNotBlank()) { "模型没有生成有效内容" }
             onProgress(QueryProgress(QueryPhase.COMPLETE, (reasoningChars / 4.0).toInt(), output.length, exactTokens))
-            StreamResult(output.toString(), exactTokens)
-        }
+            return StreamResult(output.toString(), exactTokens)
     }
 }

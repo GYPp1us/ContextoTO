@@ -20,4 +20,14 @@ class ContentTest {
         assertEquals("Another state describes it.", sentence.text)
         assertEquals(second - 8, sentence.start)
     }
+
+    @Test fun enumeratedSentencesRetainOffsetsAndMatchTapSelection() {
+        val text = "  One state acts.  Another state describes it.  "
+        val sentences = Content.sentences(text)
+        assertEquals(listOf("One state acts.", "Another state describes it."), sentences.map { it.text })
+        sentences.forEach { sentence ->
+            assertEquals(sentence.text, text.substring(sentence.start, sentence.end))
+            assertEquals(sentence, Content.sentenceAt(text, sentence.start + 2))
+        }
+    }
 }

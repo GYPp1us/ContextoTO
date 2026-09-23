@@ -87,6 +87,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -126,6 +129,12 @@ private data class TokenGlyph(val token: Token, val rect: Rect, val baseline: Fl
 private data class WordTarget(val paragraphIndex: Int, val token: Token, val anchor: TokenGlyph, val inSentence: Boolean)
 private data class SentenceTarget(val paragraphIndex: Int, val sentence: Sentence, val sourceGlyphs: List<TokenGlyph>)
 private data class ReaderScale(val bodySize: Float, val lineFactor: Float, val sideMargin: Float, val paragraphGap: Float)
+private data class ArticleSentence(val paragraphIndex: Int, val number: Int, val sentence: Sentence)
+private data class CachedSentence(val item: ArticleSentence, val translation: String)
+private data class SilentRunState(
+    val active: ArticleSentence? = null, val progress: QueryProgress? = null,
+    val error: String? = null, val running: Boolean = false
+)
 
 @Composable
 private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettings, engine: AnalysisEngine) {
@@ -156,13 +165,43 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     var sentenceError by remember { mutableStateOf<String?>(null) }
     var retryWord by remember { mutableIntStateOf(0) }
     var retrySentence by remember { mutableIntStateOf(0) }
+    var retrySilent by remember { mutableIntStateOf(0) }
     var lookupEpoch by remember { mutableIntStateOf(0) }
+    var cacheEpoch by remember { mutableIntStateOf(0) }
+    val articleSentences = remember(article.id) {
+        article.paragraphs.flatMapIndexed { paragraphIndex, text ->
+            Content.sentences(text).filter { Content.tokens(it.text).isNotEmpty() }
+                .map { paragraphIndex to it }
+        }.mapIndexed { index, (paragraphIndex, sentence) -> ArticleSentence(paragraphIndex, index + 1, sentence) }
+    }
+    val cachedSentences = remember(article.id, provider, cacheEpoch) {
+        articleSentences.mapNotNull { item -> engine.cachedSentence(provider, item.sentence.text)?.let {
+            CachedSentence(item, it.optString("translation_zh"))
+        } }
+    }
+    val silentPercent = if (articleSentences.isEmpty()) 100 else cachedSentences.size * 100 / articleSentences.size
+    val percentLabel = "$silentPercent%"
+    var silentRun by remember(article.id, provider) { mutableStateOf(SilentRunState()) }
+    var silentOpen by remember { mutableStateOf(false) }
+    var percentAnchor by remember { mutableStateOf<TokenGlyph?>(null) }
+    var flightAnchor by remember { mutableStateOf<TokenGlyph?>(null) }
+    var flightPercent by remember { mutableStateOf(percentLabel) }
+    var percentSourceLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    var percentDestination by remember { mutableStateOf<TokenGlyph?>(null) }
+    val percentMotion = remember { Animatable(0f) }
     var lastSentence by remember { mutableStateOf<SentenceTarget?>(null) }
     var lastWord by remember { mutableStateOf<WordTarget?>(null) }
     var sentenceDestination by remember { mutableStateOf<List<TokenGlyph>>(emptyList()) }
     var wordDestination by remember { mutableStateOf<TokenGlyph?>(null) }
     val sentenceMotion = remember { Animatable(0f) }
     val wordMotion = remember { Animatable(0f) }
+    LaunchedEffect(silentOpen, percentDestination != null) {
+        if (silentOpen && percentDestination != null) {
+            percentMotion.animateTo(1f, tween(420, easing = FastOutSlowInEasing))
+        } else if (!silentOpen) {
+            percentMotion.animateTo(0f, tween(310, easing = FastOutSlowInEasing))
+        }
+    }
     LaunchedEffect(sentenceOpen) { if (sentenceOpen != null) lastSentence = sentenceOpen }
     LaunchedEffect(wordTarget) { if (wordTarget != null) lastWord = wordTarget }
     LaunchedEffect(sentenceOpen, sentenceDestination.isNotEmpty()) {
@@ -183,15 +222,28 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     val savedOffset = if (article.id == initial?.articleId) initial.offset else 0
     val listState = remember(article.id) { androidx.compose.foundation.lazy.LazyListState(savedItem, savedOffset) }
 
+    LaunchedEffect(article.id) {
+        silentOpen = false
+        percentAnchor = null
+        flightAnchor = null
+        percentDestination = null
+        percentMotion.snapTo(0f)
+    }
+
     fun closeTop() {
         when {
             settingsOpen -> settingsOpen = false
+            silentOpen -> {
+                flightPercent = percentLabel
+                flightAnchor = percentAnchor
+                silentOpen = false
+            }
             wordTarget != null -> wordTarget = null
             sentenceOpen != null -> sentenceOpen = null
             drawerOpen -> drawerOpen = false
         }
     }
-    BackHandler(settingsOpen || wordTarget != null || sentenceOpen != null || drawerOpen) { closeTop() }
+    BackHandler(settingsOpen || silentOpen || wordTarget != null || sentenceOpen != null || drawerOpen) { closeTop() }
 
     LaunchedEffect(article.id, listState) {
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
@@ -199,14 +251,28 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                 store.savePlace(article.id, item, offset)
             }
     }
-    LaunchedEffect(article.id, provider.name, provider.key, provider.model) {
-        if (provider.key.isNotBlank()) {
-            val visibleIndex = (listState.firstVisibleItemIndex - 1).coerceIn(article.paragraphs.indices)
-            val next = article.paragraphs.indices.asSequence().filter { it >= visibleIndex }
-                .map { index -> Content.sentenceAt(article.paragraphs[index], 0) }
-                .firstOrNull { engine.cachedSentence(provider, it.text) == null }
-            if (next != null) runCatching { engine.sentence(provider, article, next) {} }
+    LaunchedEffect(article.id, provider, retrySilent) {
+        silentRun = SilentRunState()
+        if (provider.key.isBlank()) return@LaunchedEffect
+        silentRun = SilentRunState(running = true)
+        for (item in articleSentences.distinctBy { it.sentence.text }) {
+            currentCoroutineContext().ensureActive()
+            if (engine.cachedSentence(provider, item.sentence.text) != null) continue
+            silentRun = SilentRunState(active = item, running = true)
+            try {
+                engine.sentence(provider, article, item.sentence) { progress ->
+                    silentRun = silentRun.copy(progress = progress)
+                }
+                cacheEpoch++
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                silentRun = SilentRunState(active = item, error = readableQueryError(error))
+                return@LaunchedEffect
+            }
+            delay(350)
         }
+        silentRun = SilentRunState()
     }
     LaunchedEffect(wordTarget, retryWord, provider) {
         val target = wordTarget ?: return@LaunchedEffect
@@ -234,6 +300,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         if (cached != null) {
             sentenceResult = cached
             store.recordLookup(article.id, "sentence", "${target.paragraphIndex}:${target.sentence.start}"); lookupEpoch++
+            cacheEpoch++
         } else if (provider.key.isBlank()) {
             sentenceError = "尚未配置 API Key。英文原句仍可阅读。"
         } else {
@@ -241,11 +308,12 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                 .onSuccess {
                     sentenceResult = it; sentenceProgress = null
                     store.recordLookup(article.id, "sentence", "${target.paragraphIndex}:${target.sentence.start}"); lookupEpoch++
+                    cacheEpoch++
                 }.onFailure { sentenceError = readableQueryError(it); sentenceProgress = null }
         }
     }
 
-    val hasOverlay = drawerOpen || settingsOpen || sentenceOpen != null || wordTarget != null
+    val hasOverlay = drawerOpen || settingsOpen || silentOpen || sentenceOpen != null || wordTarget != null
     val blur by animateFloatAsState(if (hasOverlay) 26f else 0f, tween(290, easing = FastOutSlowInEasing), label = "body blur")
 
     BoxWithConstraints(Modifier.fillMaxSize().background(colors.paper).navigationBarsPadding()) {
@@ -273,6 +341,29 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                     Text("ContextoTO", color = colors.ink, fontFamily = ReadingFont, fontSize = 19.sp)
                     Spacer(Modifier.weight(1f))
                     Text(article.id.uppercase(), color = colors.muted, fontSize = 12.sp, fontFamily = ReadingFont)
+                    Spacer(Modifier.width(12.dp))
+                    Box(Modifier.width(58.dp).height(42.dp).clickable {
+                        flightPercent = percentLabel
+                        flightAnchor = percentAnchor
+                        percentDestination = null
+                        silentOpen = true
+                    }, contentAlignment = Alignment.CenterEnd) {
+                    Text(percentLabel, Modifier.graphicsLayer { alpha = if (percentDestination != null &&
+                        (silentOpen || percentMotion.value > .001f)) 0f else 1f }
+                        .onGloballyPositioned { coordinates ->
+                            val layout = percentSourceLayout ?: return@onGloballyPositioned
+                            val measured = layout.layoutInput.text.text
+                            if (measured.isEmpty()) return@onGloballyPositioned
+                            val position = coordinates.positionInRoot()
+                            val first = layout.getBoundingBox(0)
+                            val last = layout.getBoundingBox(measured.lastIndex)
+                            percentAnchor = TokenGlyph(Token(measured, 0, measured.length),
+                                Rect(position.x + first.left, position.y + first.top,
+                                    position.x + last.right, position.y + first.bottom),
+                                position.y + layout.getLineBaseline(0), with(density) { 12.sp.toPx() }, colors.word)
+                        }, onTextLayout = { percentSourceLayout = it }, color = colors.word,
+                        fontFamily = ReadingFont, fontSize = 12.sp)
+                    }
                 }
                 LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     start = scale.sideMargin.dp, end = scale.sideMargin.dp, bottom = 64.dp
@@ -377,6 +468,21 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
             MotionGlyphs(listOf(flightWord.anchor), listOf(wordDestination!!), wordMotion.value, wordTarget != null)
         }
 
+        if (silentOpen) GlassScrim(colors) {
+            flightPercent = percentLabel
+            flightAnchor = percentAnchor
+            silentOpen = false
+        }
+        AnimatedVisibility(silentOpen, enter = fadeIn(tween(160)), exit = fadeOut(tween(310))) {
+            SilentSheet(article, articleSentences, cachedSentences, silentRun, provider.key.isNotBlank(),
+                if (percentMotion.value < 1f) flightPercent else percentLabel,
+                colors, maxWidth, maxHeight, topReserve, percentMotion.value,
+                onPercentGeometry = { percentDestination = it }, onRetry = { retrySilent++ })
+        }
+        if (flightAnchor != null && percentDestination != null) {
+            MotionGlyphs(listOf(flightAnchor!!), listOf(percentDestination!!), percentMotion.value, silentOpen)
+        }
+
         if (settingsOpen) {
             GlassScrim(colors) { settingsOpen = false }
             SettingsSheet(colors, dark, markQueriedWords, provider, settings,
@@ -468,7 +574,7 @@ private fun MotionGlyphs(source: List<TokenGlyph>, destination: List<TokenGlyph>
                 val stagger = (index * .018f).coerceAtMost(.25f)
                 val t = ((progress - stagger) / (1f - stagger)).coerceIn(0f, 1f)
                 paint.color = lerp(from.color, to.color, t).toArgb()
-                paint.alpha = (255f * (1f - .12f * t)).roundToInt()
+                paint.alpha = 255
                 paint.textSize = from.sizePx + (to.sizePx - from.sizePx) * t
                 canvas.nativeCanvas.drawText(from.token.text,
                     from.rect.left + (to.rect.left - from.rect.left) * t,
@@ -511,7 +617,7 @@ private fun annotateParagraph(text: String, analysis: JSONObject?, content: Cont
         }
         for (token in Content.tokens(text)) {
             val lemma = content.lemma(token.text)
-            if (lemma in queried) addStyle(SpanStyle(color = colors.paragraph, fontWeight = FontWeight.Bold), token.start, token.end)
+            if (lemma in queried) addStyle(SpanStyle(color = colors.paragraph), token.start, token.end)
         }
         if (hidden != null && hidden.first in 0 until hidden.second && hidden.second <= text.length) {
             addStyle(SpanStyle(color = Color.Transparent), hidden.first, hidden.second)
@@ -571,6 +677,116 @@ private fun ArticleDrawer(
             Text("接口与外观设置", color = colors.ink, fontSize = 14.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.weight(1f))
             Text("→", color = colors.word, fontSize = 17.sp)
+        }
+    }
+}
+
+@Composable
+private fun SilentSheet(
+    article: Article, sentences: List<ArticleSentence>, cached: List<CachedSentence>, run: SilentRunState,
+    hasKey: Boolean, percent: String, colors: Palette, screenWidth: androidx.compose.ui.unit.Dp,
+    screenHeight: androidx.compose.ui.unit.Dp, topReserve: androidx.compose.ui.unit.Dp, motion: Float,
+    onPercentGeometry: (TokenGlyph) -> Unit, onRetry: () -> Unit
+) {
+    val density = LocalDensity.current
+    val panelWidth = screenWidth * .86f
+    val y = topReserve + 47.dp
+    val panelHeight = (screenHeight - y - 20.dp).coerceAtLeast(240.dp)
+    val fraction by animateFloatAsState(
+        if (sentences.isEmpty()) 1f else cached.size.toFloat() / sentences.size,
+        tween(650, easing = FastOutSlowInEasing), label = "silent cached fraction")
+    var percentLayout by remember(percent) { mutableStateOf<TextLayoutResult?>(null) }
+    Column(Modifier.offset(x = (screenWidth - panelWidth) / 2, y = y)
+        .width(panelWidth).height(panelHeight).padding(horizontal = 5.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+            RevealElement(0, article.id) {
+                Text("SILENT / ${article.id.uppercase()}", color = colors.word,
+                    fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.6.sp,
+                    modifier = Modifier.padding(top = 15.dp))
+            }
+            Spacer(Modifier.weight(1f))
+            Text(percent, Modifier.graphicsLayer { alpha = if (motion >= 1f) 1f else 0f }
+                .onGloballyPositioned { coordinates ->
+                    val layout = percentLayout ?: return@onGloballyPositioned
+                    val measured = layout.layoutInput.text.text
+                    if (measured.isEmpty()) return@onGloballyPositioned
+                    val position = coordinates.positionInRoot()
+                    val first = layout.getBoundingBox(0)
+                    val last = layout.getBoundingBox(measured.lastIndex)
+                    onPercentGeometry(TokenGlyph(Token(measured, 0, measured.length),
+                        Rect(position.x + first.left, position.y + first.top,
+                            position.x + last.right, position.y + first.bottom),
+                        position.y + layout.getLineBaseline(0), with(density) { 42.sp.toPx() }, colors.ink))
+                }, onTextLayout = { percentLayout = it }, color = colors.ink,
+                fontFamily = ReadingFont, fontSize = 42.sp, fontWeight = FontWeight.Normal)
+        }
+        Spacer(Modifier.height(13.dp))
+        RevealElement(1, article.id) {
+            Text("静默推理", color = colors.ink, fontFamily = FontFamily.Serif,
+                fontSize = 27.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(8.dp))
+        RevealElement(2, article.id to cached.size) {
+            Text("${cached.size} / ${sentences.size} 句已缓存", color = colors.muted, fontSize = 13.sp)
+        }
+        Text("串行后台请求 · 消耗所选服务额度", color = colors.muted,
+            fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
+        Spacer(Modifier.height(18.dp))
+        Box(Modifier.fillMaxWidth().height(3.dp).background(colors.muted.copy(alpha = .22f))) {
+            Box(Modifier.fillMaxWidth(fraction.coerceIn(0f, 1f)).height(3.dp).background(colors.word))
+        }
+        Spacer(Modifier.height(17.dp))
+        val active = run.active
+        val status = when {
+            !hasKey -> "未配置 API Key · 请在设置中选择服务"
+            run.error != null -> "推理已停下 · ${run.error}"
+            active != null -> "正在处理第 ${active.number} / ${sentences.size} 句 · 第 ${active.paragraphIndex + 1} 段"
+            run.running -> "正在检查缓存"
+            cached.size == sentences.size -> "当前文章已全部缓存"
+            else -> "等待开始"
+        }
+        RevealElement(3, article.id to status) {
+            Text(status, color = if (run.error == null) colors.word else colors.paragraph,
+                fontSize = 13.sp, lineHeight = 19.sp)
+        }
+        if (active != null && run.error == null) {
+            val phase = when (run.progress?.phase) {
+                QueryPhase.CONTEXT, null -> "拼接上下文"
+                QueryPhase.FIRST -> "等待首字返回"
+                QueryPhase.STREAM, QueryPhase.COMPLETE -> "接收完整结果"
+            }
+            val tokens = run.progress?.exactReasoningTokens ?: run.progress?.approximateReasoningTokens ?: 0
+            Text("$phase${if (tokens > 0) " · 已推理约 $tokens tokens" else ""}",
+                color = colors.muted, fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
+            Text(active.sentence.text, color = colors.muted, fontFamily = ReadingFont,
+                fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 9.dp))
+        }
+        if (run.error != null && hasKey) Text("重试静默推理 →", Modifier.clickable(onClick = onRetry)
+            .padding(top = 12.dp), color = colors.word, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(24.dp))
+        RevealElement(4, article.id) {
+            Text("已缓存内容", color = colors.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(10.dp))
+        Column(Modifier.weight(1f).fillMaxWidth().clipToBounds().verticalScroll(rememberScrollState())) {
+            if (cached.isEmpty()) Text("完成的句子会显示在这里。", color = colors.muted,
+                fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
+            cached.forEach { entry ->
+                RevealElement(5 + entry.item.number, entry.item, Modifier.fillMaxWidth()) {
+                    Column(Modifier.fillMaxWidth().padding(bottom = 22.dp)) {
+                        Text("${entry.item.number.toString().padStart(2, '0')}  /  第 ${entry.item.paragraphIndex + 1} 段",
+                            color = colors.word, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(entry.item.sentence.text, color = colors.ink, fontFamily = ReadingFont,
+                            fontSize = 15.sp, lineHeight = 21.sp, maxLines = 2,
+                            overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 5.dp))
+                        Text(entry.translation, color = colors.muted, fontFamily = FontFamily.Serif,
+                            fontSize = 13.sp, lineHeight = 19.sp, maxLines = 2,
+                            overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
+            }
+            Spacer(Modifier.height(30.dp))
         }
     }
 }
@@ -704,7 +920,7 @@ private fun WordSheet(
                     position.x + layout.getBoundingBox(target.token.text.length - 1).right, position.y + box.bottom),
                 position.y + layout.getLineBaseline(0), size, colors.ink))
         }, onTextLayout = { titleLayout = it }, color = colors.ink, fontFamily = ReadingFont,
-            fontSize = 42.sp, lineHeight = 47.sp, fontWeight = FontWeight.Bold)
+            fontSize = 42.sp, lineHeight = 47.sp, fontWeight = FontWeight.Normal)
         Spacer(Modifier.height(5.dp))
         RevealElement(1, target) {
             Text(labelsFor(lexeme).joinToString("   ·   ").ifBlank { "语境词" }, color = colors.word,
