@@ -71,6 +71,9 @@ class SecureSettings(private val context: Context) {
     var markQueriedWords: Boolean
         get() = prefs.getBoolean("mark_queried_words", false)
         set(value) { prefs.edit().putBoolean("mark_queried_words", value).apply() }
+    var silentInference: Boolean
+        get() = prefs.getBoolean("silent_inference", false)
+        set(value) { prefs.edit().putBoolean("silent_inference", value).apply() }
     var bodySize: Float
         get() = prefs.getFloat("body_size", 20f).coerceIn(16f, 28f)
         set(value) { prefs.edit().putFloat("body_size", value.coerceIn(16f, 28f)).apply() }

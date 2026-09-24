@@ -144,6 +144,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     val article = content.articles[articleIndex]
     var dark by remember { mutableStateOf(settings.dark) }
     var markQueriedWords by remember { mutableStateOf(settings.markQueriedWords) }
+    var silentInference by remember { mutableStateOf(settings.silentInference) }
     var scale by remember { mutableStateOf(ReaderScale(settings.bodySize, settings.lineFactor, settings.sideMargin, settings.paragraphGap)) }
     val colors = palette(dark)
     SideEffect {
@@ -251,8 +252,9 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                 store.savePlace(article.id, item, offset)
             }
     }
-    LaunchedEffect(article.id, provider, retrySilent) {
+    LaunchedEffect(article.id, provider, silentInference, retrySilent) {
         silentRun = SilentRunState()
+        if (!silentInference) return@LaunchedEffect
         if (provider.key.isBlank()) return@LaunchedEffect
         silentRun = SilentRunState(running = true)
         for (item in articleSentences.distinctBy { it.sentence.text }) {
@@ -316,7 +318,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     val hasOverlay = drawerOpen || settingsOpen || silentOpen || sentenceOpen != null || wordTarget != null
     val blur by animateFloatAsState(if (hasOverlay) 26f else 0f, tween(290, easing = FastOutSlowInEasing), label = "body blur")
 
-    BoxWithConstraints(Modifier.fillMaxSize().background(colors.paper).navigationBarsPadding()) {
+    BoxWithConstraints(Modifier.fillMaxSize().background(colors.paper)) {
         val width = maxWidth
         val height = maxHeight
         val density = LocalDensity.current
@@ -334,7 +336,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
             translationX = drawerShift
             renderEffect = if (blur > 0.1f) BlurEffect(blur, blur, TileMode.Clamp) else null
         }) {
-            Column(Modifier.fillMaxSize().padding(top = topReserve)) {
+            Column(Modifier.fillMaxSize().navigationBarsPadding().padding(top = topReserve)) {
                 Row(Modifier.fillMaxWidth().padding(start = scale.sideMargin.dp, end = scale.sideMargin.dp, top = 22.dp, bottom = 18.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Text("≡", Modifier.clickable { drawerOpen = true }.padding(end = 18.dp), color = colors.ink, fontSize = 27.sp)
@@ -411,7 +413,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
             enter = fadeIn(tween(220)) + slideInHorizontally(tween(340, easing = FastOutSlowInEasing)) { -it / 5 },
             exit = fadeOut(tween(200)) + slideOutHorizontally(tween(290, easing = FastOutSlowInEasing)) { -it / 5 }) {
             ArticleDrawer(content, store, article.id, lookupEpoch, colors,
-                Modifier.width(width * .80f).fillMaxHeight().padding(top = topReserve),
+                Modifier.width(width * .80f).fillMaxHeight().navigationBarsPadding().padding(top = topReserve),
                 onSelect = { index ->
                     articleIndex = index; wordTarget = null; sentenceOpen = null; drawerOpen = false
                     store.savePlace(content.articles[index].id, 0, 0)
@@ -421,9 +423,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         val activeSentence = sentenceOpen ?: lastSentence
         if (sentenceOpen != null) GlassScrim(colors) { sentenceOpen = null; wordTarget = null }
         if (activeSentence != null) {
-            val sourceTop = activeSentence.sourceGlyphs.minOfOrNull { it.rect.top } ?: 0f
-            val sentenceY = (with(density) { sourceTop.toDp() } - 66.dp)
-                .coerceIn(topReserve + 8.dp, height * .58f)
+            val sentenceY = topReserve + 8.dp
             val secondBlur by animateFloatAsState(if (wordTarget?.inSentence == true) 23f else 0f,
                 tween(220), label = "sentence behind word blur")
             AnimatedVisibility(sentenceOpen != null,
@@ -474,7 +474,8 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
             silentOpen = false
         }
         AnimatedVisibility(silentOpen, enter = fadeIn(tween(160)), exit = fadeOut(tween(310))) {
-            SilentSheet(article, articleSentences, cachedSentences, silentRun, provider.key.isNotBlank(),
+            SilentSheet(article, articleSentences, cachedSentences, silentRun, silentInference,
+                provider.key.isNotBlank(),
                 if (percentMotion.value < 1f) flightPercent else percentLabel,
                 colors, maxWidth, maxHeight, topReserve, percentMotion.value,
                 onPercentGeometry = { percentDestination = it }, onRetry = { retrySilent++ })
@@ -485,10 +486,12 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
 
         if (settingsOpen) {
             GlassScrim(colors) { settingsOpen = false }
-            SettingsSheet(colors, dark, markQueriedWords, provider, settings,
-                Modifier.align(Alignment.TopCenter).fillMaxSize().statusBarsPadding().padding(top = topReserve),
+            SettingsSheet(colors, dark, markQueriedWords, silentInference, provider, settings,
+                Modifier.align(Alignment.TopCenter).fillMaxSize().statusBarsPadding()
+                    .navigationBarsPadding().padding(top = topReserve),
                 onDark = { dark = it; settings.dark = it },
                 onMarkQueriedWords = { markQueriedWords = it; settings.markQueriedWords = it },
+                onSilentInference = { silentInference = it; settings.silentInference = it },
                 onSave = {
                     provider = settings.provider()
                     scale = ReaderScale(settings.bodySize, settings.lineFactor, settings.sideMargin, settings.paragraphGap)
@@ -684,7 +687,7 @@ private fun ArticleDrawer(
 @Composable
 private fun SilentSheet(
     article: Article, sentences: List<ArticleSentence>, cached: List<CachedSentence>, run: SilentRunState,
-    hasKey: Boolean, percent: String, colors: Palette, screenWidth: androidx.compose.ui.unit.Dp,
+    enabled: Boolean, hasKey: Boolean, percent: String, colors: Palette, screenWidth: androidx.compose.ui.unit.Dp,
     screenHeight: androidx.compose.ui.unit.Dp, topReserve: androidx.compose.ui.unit.Dp, motion: Float,
     onPercentGeometry: (TokenGlyph) -> Unit, onRetry: () -> Unit
 ) {
@@ -697,7 +700,7 @@ private fun SilentSheet(
         tween(650, easing = FastOutSlowInEasing), label = "silent cached fraction")
     var percentLayout by remember(percent) { mutableStateOf<TextLayoutResult?>(null) }
     Column(Modifier.offset(x = (screenWidth - panelWidth) / 2, y = y)
-        .width(panelWidth).height(panelHeight).padding(horizontal = 5.dp)) {
+        .width(panelWidth).height(panelHeight).navigationBarsPadding().padding(horizontal = 5.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
             RevealElement(0, article.id) {
                 Text("SILENT / ${article.id.uppercase()}", color = colors.word,
@@ -729,7 +732,9 @@ private fun SilentSheet(
         RevealElement(2, article.id to cached.size) {
             Text("${cached.size} / ${sentences.size} 句已缓存", color = colors.muted, fontSize = 13.sp)
         }
-        Text("串行后台请求 · 消耗所选服务额度", color = colors.muted,
+        Text(
+            if (enabled) "串行后台请求 · 消耗所选服务额度" else "后台请求已停用 · 不消耗模型额度",
+            color = colors.muted,
             fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
         Spacer(Modifier.height(18.dp))
         Box(Modifier.fillMaxWidth().height(3.dp).background(colors.muted.copy(alpha = .22f))) {
@@ -738,6 +743,7 @@ private fun SilentSheet(
         Spacer(Modifier.height(17.dp))
         val active = run.active
         val status = when {
+            !enabled -> "静默推理已关闭 · 已有缓存仍可查看"
             !hasKey -> "未配置 API Key · 请在设置中选择服务"
             run.error != null -> "推理已停下 · ${run.error}"
             active != null -> "正在处理第 ${active.number} / ${sentences.size} 句 · 第 ${active.paragraphIndex + 1} 段"
@@ -749,7 +755,7 @@ private fun SilentSheet(
             Text(status, color = if (run.error == null) colors.word else colors.paragraph,
                 fontSize = 13.sp, lineHeight = 19.sp)
         }
-        if (active != null && run.error == null) {
+        if (enabled && active != null && run.error == null) {
             val phase = when (run.progress?.phase) {
                 QueryPhase.CONTEXT, null -> "拼接上下文"
                 QueryPhase.FIRST -> "等待首字返回"
@@ -762,7 +768,7 @@ private fun SilentSheet(
                 fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 9.dp))
         }
-        if (run.error != null && hasKey) Text("重试静默推理 →", Modifier.clickable(onClick = onRetry)
+        if (enabled && run.error != null && hasKey) Text("重试静默推理 →", Modifier.clickable(onClick = onRetry)
             .padding(top = 12.dp), color = colors.word, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(24.dp))
         RevealElement(4, article.id) {
@@ -800,7 +806,7 @@ private fun SentenceSheet(
 ) {
     val text = target.sentence.text
     val queried = remember(article.id, result) { store.queriedWords(article.id) }
-    Column(modifier.verticalScroll(rememberScrollState())
+    Column(modifier.navigationBarsPadding().verticalScroll(rememberScrollState())
         .padding(horizontal = 24.dp, vertical = 28.dp)) {
         RevealElement(0, target) {
             Text("SENTENCE / ${article.id.uppercase()}", color = colors.paragraph, fontSize = 11.sp,
@@ -901,6 +907,7 @@ private fun WordSheet(
     val lexeme = content.lexeme(target.token.text)
     var titleLayout by remember(target) { mutableStateOf<TextLayoutResult?>(null) }
     Column(Modifier.offset(x = x, y = y).width(panelWidth).heightIn(max = maxSheetHeight)
+        .navigationBarsPadding()
         .onSizeChanged { if (measuredHeightPx != it.height) measuredHeightPx = it.height }
         .verticalScroll(rememberScrollState()).padding(horizontal = 5.dp, vertical = 10.dp)) {
         RevealElement(0, target) {
@@ -1071,8 +1078,10 @@ private fun ProgressBlock(progress: QueryProgress?, colors: Palette) {
 
 @Composable
 private fun SettingsSheet(
-    colors: Palette, dark: Boolean, markQueriedWords: Boolean, current: Provider, settings: SecureSettings, modifier: Modifier,
-    onDark: (Boolean) -> Unit, onMarkQueriedWords: (Boolean) -> Unit, onSave: () -> Unit
+    colors: Palette, dark: Boolean, markQueriedWords: Boolean, silentInference: Boolean,
+    current: Provider, settings: SecureSettings, modifier: Modifier,
+    onDark: (Boolean) -> Unit, onMarkQueriedWords: (Boolean) -> Unit,
+    onSilentInference: (Boolean) -> Unit, onSave: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
@@ -1107,6 +1116,16 @@ private fun SettingsSheet(
                 fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
         Text("默认关闭；只影响着色，不删除查询记录。", color = colors.muted,
+            fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
+        Spacer(Modifier.height(20.dp))
+        Row(Modifier.fillMaxWidth().clickable { onSilentInference(!silentInference) },
+            verticalAlignment = Alignment.CenterVertically) {
+            Text("静默推理", color = colors.ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            Text(if (silentInference) "ON" else "OFF", color = colors.word,
+                fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        }
+        Text("默认关闭；开启后会在后台逐句调用模型并消耗额度。", color = colors.muted,
             fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
         Spacer(Modifier.height(24.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
