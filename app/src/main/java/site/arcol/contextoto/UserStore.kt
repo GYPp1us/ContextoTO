@@ -95,6 +95,15 @@ class SecureSettings(private val context: Context) {
     var customModel: String
         get() = prefs.getString("custom_model", "") ?: ""
         set(value) { prefs.edit().putString("custom_model", value).apply() }
+    var focusUrl: String
+        get() = prefs.getString("focus_url", null)?.let(::decrypt).orEmpty()
+        set(value) { prefs.edit().putString("focus_url", if (value.isBlank()) "" else encrypt(value.trim())).apply() }
+    var focusSubjectId: Int
+        get() = prefs.getInt("focus_subject_id", 0)
+        set(value) { prefs.edit().putInt("focus_subject_id", value).apply() }
+    var focusItemId: Int
+        get() = prefs.getInt("focus_item_id", 0)
+        set(value) { prefs.edit().putInt("focus_item_id", value).apply() }
 
     private fun secretKey(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

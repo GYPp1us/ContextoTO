@@ -48,12 +48,14 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -90,9 +92,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
@@ -101,6 +106,7 @@ import kotlin.math.roundToInt
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        UpdateChecker.cleanupInterrupted(this)
         val content = Content(this)
         val store = UserStore(this)
         val settings = SecureSettings(this)
@@ -145,6 +151,20 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     var dark by remember { mutableStateOf(settings.dark) }
     var markQueriedWords by remember { mutableStateOf(settings.markQueriedWords) }
     var silentInference by remember { mutableStateOf(settings.silentInference) }
+    var focusUrl by remember { mutableStateOf(settings.focusUrl) }
+    var focusSubjectId by remember { mutableIntStateOf(settings.focusSubjectId) }
+    var focusItemId by remember { mutableIntStateOf(settings.focusItemId) }
+    var focusStatus by remember { mutableStateOf("未配置专注上报") }
+    var appResumed by remember { mutableStateOf(activity.lifecycle.currentState.isAtLeast(
+        androidx.lifecycle.Lifecycle.State.RESUMED)) }
+    DisposableEffect(activity) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) appResumed = true
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE) appResumed = false
+        }
+        activity.lifecycle.addObserver(observer)
+        onDispose { activity.lifecycle.removeObserver(observer) }
+    }
     var scale by remember { mutableStateOf(ReaderScale(settings.bodySize, settings.lineFactor, settings.sideMargin, settings.paragraphGap)) }
     val colors = palette(dark)
     SideEffect {
@@ -156,6 +176,16 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     var provider by remember { mutableStateOf(settings.provider()) }
     var drawerOpen by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
+    var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+    var updateStatus by remember { mutableStateOf("点击检查 GitHub 正式版") }
+    var updateChecking by remember { mutableStateOf(false) }
+    var updateOpen by remember { mutableStateOf(false) }
+    var updateProgress by remember { mutableStateOf(DownloadProgress(DownloadPhase.CONNECTING)) }
+    var updateError by remember { mutableStateOf<String?>(null) }
+    var updateFile by remember { mutableStateOf<File?>(null) }
+    var updateJob by remember { mutableStateOf<Job?>(null) }
+    var installLaunched by remember { mutableStateOf(false) }
+    val updateScope = rememberCoroutineScope()
     var sentenceOpen by remember { mutableStateOf<SentenceTarget?>(null) }
     var wordTarget by remember { mutableStateOf<WordTarget?>(null) }
     var wordResult by remember { mutableStateOf<JSONObject?>(null) }
@@ -231,8 +261,44 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         percentMotion.snapTo(0f)
     }
 
+    fun closeUpdate() {
+        updateJob?.cancel()
+        updateJob = null
+        if (!installLaunched) UpdateChecker.discardReady(activity)
+        updateFile = null
+        updateOpen = false
+        updateError = null
+    }
+    fun startDownload(info: UpdateInfo) {
+        if (updateOpen) return
+        updateOpen = true
+        updateProgress = DownloadProgress(DownloadPhase.CONNECTING)
+        updateError = null
+        updateFile = null
+        installLaunched = false
+        updateJob = updateScope.launch {
+            try {
+                updateFile = UpdateChecker.download(activity, info) { updateProgress = it }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                updateError = error.message ?: "下载失败，请重试"
+            } finally {
+                if (updateJob == currentCoroutineContext().job) updateJob = null
+            }
+        }
+    }
+    DisposableEffect(activity, updateOpen, updateJob) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP && updateOpen && updateJob?.isActive == true)
+                closeUpdate()
+        }
+        activity.lifecycle.addObserver(observer)
+        onDispose { activity.lifecycle.removeObserver(observer) }
+    }
     fun closeTop() {
         when {
+            updateOpen -> closeUpdate()
             settingsOpen -> settingsOpen = false
             silentOpen -> {
                 flightPercent = percentLabel
@@ -244,13 +310,31 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
             drawerOpen -> drawerOpen = false
         }
     }
-    BackHandler(settingsOpen || silentOpen || wordTarget != null || sentenceOpen != null || drawerOpen) { closeTop() }
+    BackHandler(updateOpen || settingsOpen || silentOpen || wordTarget != null || sentenceOpen != null || drawerOpen) { closeTop() }
 
     LaunchedEffect(article.id, listState) {
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
             .distinctUntilChanged().debounce(350).collect { (item, offset) ->
                 store.savePlace(article.id, item, offset)
             }
+    }
+    LaunchedEffect(focusUrl, focusSubjectId, focusItemId, appResumed, drawerOpen, settingsOpen, updateOpen) {
+        if (focusUrl.isBlank() || focusSubjectId <= 0 || focusItemId <= 0) {
+            focusStatus = "未配置专注上报"
+            return@LaunchedEffect
+        }
+        if (!appResumed || drawerOpen || settingsOpen || updateOpen) {
+            focusStatus = "阅读暂停 · 已停止上报"
+            return@LaunchedEffect
+        }
+        focusStatus = "正在连接专注目录…"
+        try {
+            FocusReporter.track(focusUrl, focusSubjectId, focusItemId) { focusStatus = it }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            focusStatus = error.message ?: "专注上报不可用"
+        }
     }
     LaunchedEffect(article.id, provider, silentInference, retrySilent) {
         silentRun = SilentRunState()
@@ -279,7 +363,8 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     LaunchedEffect(wordTarget, retryWord, provider) {
         val target = wordTarget ?: return@LaunchedEffect
         wordResult = null; wordProgress = null; wordError = null
-        val text = article.paragraphs.getOrNull(target.paragraphIndex) ?: return@LaunchedEffect
+        val text = if (target.paragraphIndex < 0) article.title
+            else article.paragraphs.getOrNull(target.paragraphIndex) ?: return@LaunchedEffect
         val cached = engine.cachedWord(provider, text, target.token)
         if (cached != null) {
             wordResult = cached
@@ -317,6 +402,8 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
 
     val hasOverlay = drawerOpen || settingsOpen || silentOpen || sentenceOpen != null || wordTarget != null
     val blur by animateFloatAsState(if (hasOverlay) 26f else 0f, tween(290, easing = FastOutSlowInEasing), label = "body blur")
+    val updateBlur by animateFloatAsState(if (updateOpen) 26f else 0f,
+        tween(290, easing = FastOutSlowInEasing), label = "settings blur")
 
     BoxWithConstraints(Modifier.fillMaxSize().background(colors.paper)) {
         val width = maxWidth
@@ -374,8 +461,29 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                         Text("READING / ${articleIndex + 1} OF 48", color = colors.word, fontSize = 11.sp,
                             fontWeight = FontWeight.Bold, letterSpacing = 1.6.sp)
                         Spacer(Modifier.height(10.dp))
-                        Text(smallCapsTitle(article.title, 24f), color = colors.ink, fontFamily = ReadingFont,
-                            fontSize = 24.sp, lineHeight = 30.sp, fontWeight = FontWeight.Normal)
+                        val sourceSentence = sentenceOpen ?: lastSentence.takeIf { sentenceMotion.value > .001f }
+                        val sourceWord = wordTarget ?: lastWord.takeIf { wordMotion.value > .001f }
+                        val hidden = when {
+                            sourceSentence?.paragraphIndex == -1 -> sourceSentence.sentence.start to sourceSentence.sentence.end
+                            sourceWord?.paragraphIndex == -1 && !sourceWord.inSentence ->
+                                sourceWord.token.start to sourceWord.token.end
+                            else -> null
+                        }
+                        InteractiveParagraph(article.title, colors, null, content,
+                            if (markQueriedWords) store.queriedWords(article.id) else emptySet(),
+                            scale.copy(bodySize = 24f, lineFactor = 1.25f), Modifier.fillMaxWidth(),
+                            onWord = { token, anchor ->
+                                wordDestination = null
+                                wordTarget = WordTarget(-1, token, anchor, false)
+                            }, onLongWord = { token, glyphs ->
+                                val sentence = Content.sentenceAt(article.title, token.start)
+                                sentenceDestination = emptyList()
+                                sentenceOpen = SentenceTarget(-1, sentence, glyphs.map { glyph ->
+                                    glyph.copy(token = glyph.token.copy(
+                                        start = glyph.token.start - sentence.start,
+                                        end = glyph.token.end - sentence.start))
+                                })
+                            }, hidden = hidden, titleMode = true)
                         Spacer(Modifier.height(28.dp))
                     }
                     itemsIndexed(article.paragraphs) { index, text ->
@@ -432,7 +540,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                     renderEffect = if (secondBlur > .1f) BlurEffect(secondBlur, secondBlur, TileMode.Clamp) else null
                 }) {
                     SentenceSheet(article, activeSentence, sentenceResult, sentenceProgress, sentenceError,
-                        content, store, colors, scale, sentenceMotion.value,
+                        content, store, colors, scale, markQueriedWords, sentenceMotion.value,
                         (wordTarget ?: lastWord.takeIf { wordMotion.value > .001f })?.takeIf { it.inSentence },
                         Modifier.align(Alignment.TopCenter).offset(y = sentenceY).fillMaxWidth()
                             .heightIn(max = height - sentenceY - 18.dp),
@@ -441,7 +549,8 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                             val absolute = Token(token.text, token.start + activeSentence.sentence.start,
                                 token.end + activeSentence.sentence.start)
                             wordDestination = null
-                            wordTarget = WordTarget(activeSentence.paragraphIndex, absolute, anchor, true)
+                            wordTarget = WordTarget(activeSentence.paragraphIndex, absolute,
+                                anchor.copy(token = absolute), true)
                         }, onRetry = { retrySentence++ })
                 }
             }
@@ -487,16 +596,72 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         if (settingsOpen) {
             GlassScrim(colors) { settingsOpen = false }
             SettingsSheet(colors, dark, markQueriedWords, silentInference, provider, settings,
+                updateStatus, updateInfo, updateChecking, focusStatus,
                 Modifier.align(Alignment.TopCenter).fillMaxSize().statusBarsPadding()
-                    .navigationBarsPadding().padding(top = topReserve),
+                    .navigationBarsPadding().padding(top = topReserve).graphicsLayer {
+                        renderEffect = if (updateBlur > .1f) BlurEffect(updateBlur, updateBlur, TileMode.Clamp) else null
+                    },
                 onDark = { dark = it; settings.dark = it },
                 onMarkQueriedWords = { markQueriedWords = it; settings.markQueriedWords = it },
                 onSilentInference = { silentInference = it; settings.silentInference = it },
+                onCheckUpdate = {
+                    if (!updateChecking) updateScope.launch {
+                        updateChecking = true
+                        updateStatus = "正在检查…"
+                        updateInfo = null
+                        try {
+                            val info = UpdateChecker.check()
+                            updateInfo = info.takeIf { it.available }
+                            updateStatus = if (info.available) "发现 ${info.latest} · 点击在应用内下载"
+                                else "已是最新版本 · v${info.current}"
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Exception) {
+                            updateStatus = error.message ?: "检查失败，请检查网络"
+                        } finally {
+                            updateChecking = false
+                        }
+                    }
+                },
+                onDownloadUpdate = { updateInfo?.let(::startDownload) },
                 onSave = {
                     provider = settings.provider()
                     scale = ReaderScale(settings.bodySize, settings.lineFactor, settings.sideMargin, settings.paragraphGap)
+                    focusUrl = settings.focusUrl
+                    focusSubjectId = settings.focusSubjectId
+                    focusItemId = settings.focusItemId
                     settingsOpen = false
                 })
+        }
+        AnimatedVisibility(updateOpen, enter = fadeIn(tween(180)), exit = fadeOut(tween(260))) {
+            Box(Modifier.fillMaxSize()) {
+            GlassScrim(colors) { closeUpdate() }
+            UpdateDownloadSheet(updateInfo?.latest.orEmpty(), updateProgress, updateError, updateFile != null,
+                colors, width, topReserve,
+                onCancel = { closeUpdate() },
+                onRetry = { updateInfo?.let { info -> closeUpdate(); startDownload(info) } },
+                onInstall = {
+                    val apk = updateFile
+                    if (apk != null) {
+                        try {
+                            if (!activity.packageManager.canRequestPackageInstalls()) {
+                                activity.startActivity(android.content.Intent(
+                                    android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                    android.net.Uri.parse("package:${activity.packageName}")))
+                            } else {
+                                val uri = androidx.core.content.FileProvider.getUriForFile(activity,
+                                    "${activity.packageName}.updates", apk)
+                                activity.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW)
+                                    .setDataAndType(uri, "application/vnd.android.package-archive")
+                                    .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION))
+                                installLaunched = true
+                            }
+                        } catch (error: Exception) {
+                            updateError = error.message ?: "无法打开系统安装器"
+                        }
+                    }
+                })
+            }
         }
 
     }
@@ -520,22 +685,27 @@ private fun InteractiveParagraph(
     text: String, colors: Palette, analysis: JSONObject?, content: Content, queried: Set<String>,
     scale: ReaderScale, modifier: Modifier = Modifier, onWord: (Token, TokenGlyph) -> Unit,
     onLongWord: (Token, List<TokenGlyph>) -> Unit,
-    onGeometry: ((List<TokenGlyph>) -> Unit)? = null, hidden: Pair<Int, Int>? = null
+    onGeometry: ((List<TokenGlyph>) -> Unit)? = null, hidden: Pair<Int, Int>? = null,
+    titleMode: Boolean = false
 ) {
     var result by remember(text) { mutableStateOf<TextLayoutResult?>(null) }
     var position by remember(text) { mutableStateOf(Offset.Zero) }
     val fontPx = with(LocalDensity.current) { scale.bodySize.sp.toPx() }
-    val annotated = remember(text, analysis, queried, colors, hidden) {
-        annotateParagraph(text, analysis, content, queried, colors, hidden)
+    val annotated = remember(text, analysis, queried, colors, hidden, titleMode, scale.bodySize) {
+        annotateParagraph(text, analysis, content, queried, colors, hidden,
+            if (titleMode) scale.bodySize else null)
     }
     fun glyph(token: Token, layout: TextLayoutResult): TokenGlyph {
         val first = layout.getBoundingBox(token.start)
         val last = layout.getBoundingBox(token.end - 1)
         val style = annotated.spanStyles.lastOrNull { token.start in it.start until it.end }
-        return TokenGlyph(token, Rect(first.left + position.x, first.top + position.y,
+        val displayToken = if (titleMode) token.copy(text = token.text.uppercase()) else token
+        val glyphSize = if (titleMode && token.start != text.indexOfFirst { it.isLetter() } &&
+            text[token.start].isLowerCase()) fontPx * .78f else fontPx
+        return TokenGlyph(displayToken, Rect(first.left + position.x, first.top + position.y,
             last.right + position.x, first.bottom + position.y),
             layout.getLineBaseline(layout.getLineForOffset(token.start)) + position.y,
-            fontPx, style?.item?.color ?: colors.ink)
+            glyphSize, style?.item?.color ?: colors.ink)
     }
     Text(annotated, modifier.onGloballyPositioned {
         position = it.positionInRoot()
@@ -608,19 +778,19 @@ private fun RevealElement(order: Int, revealKey: Any, modifier: Modifier = Modif
 }
 
 private fun annotateParagraph(text: String, analysis: JSONObject?, content: Content, queried: Set<String>,
-                              colors: Palette, hidden: Pair<Int, Int>?): AnnotatedString =
+                              colors: Palette, hidden: Pair<Int, Int>?, titleSize: Float? = null): AnnotatedString =
     buildAnnotatedString {
-        append(text)
+        if (titleSize != null) append(smallCapsTitle(text, titleSize)) else append(text)
+        for (token in Content.tokens(text)) {
+            val lemma = content.lemma(token.text)
+            if (lemma in queried) addStyle(SpanStyle(color = colors.paragraph), token.start, token.end)
+        }
         val clauses = analysis?.optJSONArray("clauses")
         val clauseColors = listOf(colors.word, colors.purple, colors.gold, colors.paragraph)
         if (clauses != null) for (i in 0 until clauses.length()) {
             val item = clauses.optJSONObject(i) ?: continue
             val start = item.optInt("start", -1); val end = item.optInt("end", -1)
             if (start in 0 until end && end <= text.length) addStyle(SpanStyle(color = clauseColors[i % clauseColors.size]), start, end)
-        }
-        for (token in Content.tokens(text)) {
-            val lemma = content.lemma(token.text)
-            if (lemma in queried) addStyle(SpanStyle(color = colors.paragraph), token.start, token.end)
         }
         if (hidden != null && hidden.first in 0 until hidden.second && hidden.second <= text.length) {
             addStyle(SpanStyle(color = Color.Transparent), hidden.first, hidden.second)
@@ -800,12 +970,15 @@ private fun SilentSheet(
 @Composable
 private fun SentenceSheet(
     article: Article, target: SentenceTarget, result: JSONObject?, progress: QueryProgress?, error: String?,
-    content: Content, store: UserStore, colors: Palette, scale: ReaderScale, motion: Float,
+    content: Content, store: UserStore, colors: Palette, scale: ReaderScale,
+    markQueriedWords: Boolean, motion: Float,
     nestedWord: WordTarget?, modifier: Modifier,
     onGeometry: (List<TokenGlyph>) -> Unit, onWord: (Token, TokenGlyph) -> Unit, onRetry: () -> Unit
 ) {
     val text = target.sentence.text
-    val queried = remember(article.id, result) { store.queriedWords(article.id) }
+    val queried = remember(article.id, result, markQueriedWords) {
+        if (markQueriedWords) store.queriedWords(article.id) else emptySet()
+    }
     Column(modifier.navigationBarsPadding().verticalScroll(rememberScrollState())
         .padding(horizontal = 24.dp, vertical = 28.dp)) {
         RevealElement(0, target) {
@@ -818,7 +991,8 @@ private fun SentenceSheet(
             Modifier.graphicsLayer { alpha = if (motion >= 1f) 1f else 0f },
             onWord = onWord, onLongWord = { _, _ -> }, onGeometry = onGeometry,
             hidden = nestedWord?.let { (it.token.start - target.sentence.start) to
-                (it.token.end - target.sentence.start) })
+                (it.token.end - target.sentence.start) },
+            titleMode = target.paragraphIndex < 0)
         Spacer(Modifier.height(25.dp))
         if (result != null) {
             RevealElement(1, result) {
@@ -864,9 +1038,19 @@ private fun SentenceSheet(
                     val item = glosses.optJSONObject(i) ?: continue
                     val word = item.optString("quote")
                     val labels = labelsFor(content.lexeme(word)).joinToString(" · ")
-                    RevealElement(7 + i, result to (100 + i)) {
-                        Text("$word  ·  ${item.optString("brief_zh")}  $labels", color = colors.ink,
-                            fontSize = 14.sp, lineHeight = 23.sp)
+                    RevealElement(7 + i, result to (100 + i), Modifier.fillMaxWidth()) {
+                        Column(Modifier.fillMaxWidth().padding(bottom = 19.dp)) {
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+                                Text(word, color = colors.ink, fontFamily = ReadingFont,
+                                    fontSize = 21.sp, fontWeight = FontWeight.Normal,
+                                    modifier = Modifier.weight(1f))
+                                Text("${i + 1}".padStart(2, '0'), color = colors.word,
+                                    fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                            if (labels.isNotBlank()) Text(labels, color = colors.word, fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 3.dp, bottom = 8.dp))
+                            SenseLine("句义", item.optString("brief_zh"), colors)
+                        }
                     }
                 }
             }
@@ -915,7 +1099,8 @@ private fun WordSheet(
                 fontWeight = FontWeight.Bold, letterSpacing = 1.7.sp)
         }
         Spacer(Modifier.height(8.dp))
-        Text(target.token.text, modifier = Modifier.graphicsLayer {
+        Text(if (target.paragraphIndex < 0) smallCapsTitle(target.token.text, 42f)
+            else AnnotatedString(target.token.text), modifier = Modifier.graphicsLayer {
             alpha = if (motion >= 1f) 1f else 0f
         }.onGloballyPositioned { coordinates ->
             val layout = titleLayout ?: return@onGloballyPositioned
@@ -1077,16 +1262,84 @@ private fun ProgressBlock(progress: QueryProgress?, colors: Palette) {
 }
 
 @Composable
+private fun UpdateDownloadSheet(
+    version: String, progress: DownloadProgress, error: String?, ready: Boolean,
+    colors: Palette, screenWidth: androidx.compose.ui.unit.Dp, topReserve: androidx.compose.ui.unit.Dp,
+    onCancel: () -> Unit, onRetry: () -> Unit, onInstall: () -> Unit
+) {
+    val width = screenWidth * .86f
+    val target = when (progress.phase) {
+        DownloadPhase.CONNECTING -> .05f
+        DownloadPhase.RECEIVING -> if (progress.total > 0) .10f + progress.fraction * .80f else .22f
+        DownloadPhase.VERIFYING -> .94f
+        DownloadPhase.READY -> 1f
+    }
+    val fraction by animateFloatAsState(target, tween(440, easing = FastOutSlowInEasing), label = "update download")
+    val pulse by rememberInfiniteTransition(label = "download pulse").animateFloat(
+        .48f, 1f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "download pulse alpha")
+    val phaseIndex = when (progress.phase) {
+        DownloadPhase.CONNECTING -> 0
+        DownloadPhase.RECEIVING -> 1
+        else -> 2
+    }
+    Column(Modifier.offset(x = (screenWidth - width) / 2, y = topReserve + 45.dp)
+        .width(width).padding(horizontal = 4.dp)) {
+        RevealElement(0, version) {
+            Text("UPDATE / $version", color = colors.word, fontSize = 11.sp,
+                fontWeight = FontWeight.Bold, letterSpacing = 1.6.sp)
+        }
+        Spacer(Modifier.height(22.dp))
+        RevealElement(1, version) {
+            Text(if (ready) "准备安装" else "下载更新", color = colors.ink,
+                fontFamily = FontFamily.Serif, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(11.dp))
+        Text(if (ready) "安装包已校验" else if (progress.total > 0)
+            "${(progress.fraction * 100).roundToInt()}%  ·  ${"%.1f".format(progress.bytes / 1048576.0)} / ${"%.1f".format(progress.total / 1048576.0)} MB"
+            else if (progress.phase == DownloadPhase.CONNECTING) "正在连接 GitHub 发布源"
+            else "已接收 ${"%.1f".format(progress.bytes / 1048576.0)} MB",
+            color = colors.muted, fontSize = 13.sp)
+        Spacer(Modifier.height(20.dp))
+        Box(Modifier.fillMaxWidth().height(3.dp).background(colors.muted.copy(alpha = .25f))) {
+            Box(Modifier.fillMaxWidth(fraction).height(3.dp)
+                .background(colors.word.copy(alpha = if (ready || error != null) 1f else pulse)))
+        }
+        Spacer(Modifier.height(21.dp))
+        listOf("连接发布源", "接收安装包", "校验并准备安装").forEachIndexed { index, title ->
+            Text("${if (index < phaseIndex || ready) "✓" else if (index == phaseIndex) "●" else "·"}  $title",
+                color = if (index == phaseIndex || ready) colors.word else colors.muted,
+                fontSize = 13.sp, lineHeight = 22.sp)
+        }
+        if (error != null) Text(error, color = colors.paragraph, fontSize = 13.sp,
+            lineHeight = 20.sp, modifier = Modifier.padding(top = 16.dp))
+        if (ready) {
+            Spacer(Modifier.height(21.dp))
+            Text("安装更新 →", Modifier.clickable(onClick = onInstall), color = colors.word,
+                fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Text("若系统要求允许安装，请授权后返回再点安装。", color = colors.muted,
+                fontSize = 11.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 8.dp))
+        } else if (error != null) {
+            Spacer(Modifier.height(21.dp))
+            Text("重新下载 →", Modifier.clickable(onClick = onRetry), color = colors.word,
+                fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(26.dp))
+        Text(if (ready) "关闭" else "取消下载", Modifier.clickable(onClick = onCancel),
+            color = colors.muted, fontSize = 13.sp)
+    }
+}
+
+@Composable
 private fun SettingsSheet(
     colors: Palette, dark: Boolean, markQueriedWords: Boolean, silentInference: Boolean,
-    current: Provider, settings: SecureSettings, modifier: Modifier,
+    current: Provider, settings: SecureSettings,
+    updateStatus: String, updateInfo: UpdateInfo?, updateChecking: Boolean,
+    focusStatus: String, modifier: Modifier,
     onDark: (Boolean) -> Unit, onMarkQueriedWords: (Boolean) -> Unit,
-    onSilentInference: (Boolean) -> Unit, onSave: () -> Unit
+    onSilentInference: (Boolean) -> Unit, onCheckUpdate: () -> Unit,
+    onDownloadUpdate: () -> Unit, onSave: () -> Unit
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
-    var updateStatus by remember { mutableStateOf("点击检查 GitHub 正式版") }
-    var updateUrl by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
     var selected by remember { mutableStateOf(current.name) }
     var key by remember(selected) { mutableStateOf("") }
     var url by remember { mutableStateOf(settings.customBaseUrl) }
@@ -1095,6 +1348,42 @@ private fun SettingsSheet(
     var lineFactor by remember { mutableStateOf(settings.lineFactor) }
     var sideMargin by remember { mutableStateOf(settings.sideMargin) }
     var paragraphGap by remember { mutableStateOf(settings.paragraphGap) }
+    var focusUrlInput by remember { mutableStateOf(settings.focusUrl) }
+    var focusLinkEditing by remember { mutableStateOf(settings.focusUrl.isBlank()) }
+    var focusCatalog by remember { mutableStateOf<FocusCatalog?>(null) }
+    var focusSubjectId by remember { mutableIntStateOf(settings.focusSubjectId) }
+    var focusItemId by remember { mutableIntStateOf(settings.focusItemId) }
+    var focusCatalogStatus by remember { mutableStateOf("填写上报链接后读取目录") }
+    var focusCatalogLoading by remember { mutableStateOf(false) }
+    fun loadFocusCatalog() {
+        if (focusCatalogLoading) return
+        scope.launch {
+            focusCatalogLoading = true
+            focusCatalogStatus = "正在读取科目与事项…"
+            try {
+                val catalog = FocusReporter.catalog(focusUrlInput)
+                focusCatalog = catalog
+                val subject = catalog.subjects.firstOrNull { it.id == focusSubjectId }
+                    ?: catalog.subjects.firstOrNull { it.name == "英语" && catalog.items.any { item -> item.subjectId == it.id } }
+                    ?: catalog.subjects.firstOrNull { catalog.items.any { item -> item.subjectId == it.id } }
+                focusSubjectId = subject?.id ?: 0
+                val matching = catalog.items.filter { it.subjectId == focusSubjectId }
+                focusItemId = matching.firstOrNull { it.id == focusItemId }?.id
+                    ?: matching.firstOrNull { it.name == "二轮" }?.id ?: matching.firstOrNull()?.id ?: 0
+                focusCatalogStatus = "目录已读取 · 请确认科目和事项"
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                focusCatalog = null
+                focusCatalogStatus = error.message ?: "读取目录失败"
+            } finally {
+                focusCatalogLoading = false
+            }
+        }
+    }
+    LaunchedEffect(Unit) {
+        if (focusUrlInput.isNotBlank()) loadFocusCatalog()
+    }
     Column(modifier) {
     Column(Modifier.weight(1f).fillMaxWidth().clipToBounds().verticalScroll(rememberScrollState())
         .padding(start = 26.dp, end = 26.dp, top = 26.dp, bottom = 26.dp)) {
@@ -1148,26 +1437,68 @@ private fun SettingsSheet(
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("应用更新", color = colors.ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.weight(1f))
-            Text("检查更新 →", Modifier.clickable {
-                scope.launch {
-                    updateStatus = "正在检查…"
-                    updateUrl = null
-                    runCatching { UpdateChecker.check() }.onSuccess { info ->
-                        updateStatus = if (info.available) "发现 ${info.latest}，点击前往下载"
-                            else "已是最新版本 · v${info.current}"
-                        if (info.available) updateUrl = info.url
-                    }.onFailure { updateStatus = it.message ?: "检查失败，请检查网络" }
-                }
-            }, color = colors.word, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Text(if (updateChecking) "正在检查…" else "检查更新 →",
+                Modifier.clickable(enabled = !updateChecking, onClick = onCheckUpdate),
+                color = colors.word, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
-        Text(updateStatus, Modifier.fillMaxWidth().clickable(enabled = updateUrl != null) {
-            updateUrl?.let { url ->
-                context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
-                    android.net.Uri.parse(url)))
-            }
-        }.padding(top = 7.dp), color = if (updateUrl == null) colors.muted else colors.word,
+        Text(updateStatus, Modifier.fillMaxWidth().clickable(enabled = updateInfo != null,
+            onClick = onDownloadUpdate).padding(top = 7.dp),
+            color = if (updateInfo == null) colors.muted else colors.word,
             fontSize = 12.sp, lineHeight = 18.sp)
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(30.dp))
+        Text("碎片专注", color = colors.ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        Text("阅读页处于前台时每 20 秒上报；退出阅读立即停止。", color = colors.muted,
+            fontSize = 11.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 6.dp))
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(if (focusUrlInput.isBlank()) "未配置上报链接" else "已配置 HTTPS 上报链接",
+                color = colors.muted, fontSize = 12.sp)
+            Spacer(Modifier.weight(1f))
+            Text(if (focusLinkEditing) "收起" else "修改 →",
+                Modifier.clickable { focusLinkEditing = !focusLinkEditing },
+                color = colors.word, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        }
+        if (focusLinkEditing) SettingInput("HTTPS 链接（可填 /catalog 或 /frame）", focusUrlInput, colors,
+            secret = true, onChange = {
+                focusUrlInput = it
+                focusCatalog = null
+                focusSubjectId = 0
+                focusItemId = 0
+                focusCatalogStatus = "链接变更后请重新读取目录"
+            })
+        Spacer(Modifier.height(10.dp))
+        Text(if (focusCatalogLoading) "正在读取…" else "读取科目与事项 →",
+            Modifier.clickable(enabled = !focusCatalogLoading && focusUrlInput.isNotBlank()) {
+                loadFocusCatalog()
+            }, color = colors.word, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        Text(focusCatalogStatus, color = colors.muted, fontSize = 11.sp,
+            modifier = Modifier.padding(top = 7.dp))
+        val catalog = focusCatalog
+        if (catalog != null) {
+            Spacer(Modifier.height(16.dp))
+            Text("科目", color = colors.muted, fontSize = 11.sp, letterSpacing = 1.sp)
+            catalog.subjects.filter { subject -> catalog.items.any { it.subjectId == subject.id } }
+                .forEach { subject ->
+                    Text("${if (focusSubjectId == subject.id) "●" else "○"}  ${subject.name}  #${subject.id}",
+                        Modifier.fillMaxWidth().clickable {
+                            focusSubjectId = subject.id
+                            val choices = catalog.items.filter { it.subjectId == subject.id }
+                            focusItemId = choices.firstOrNull { it.name == "二轮" }?.id ?: choices.firstOrNull()?.id ?: 0
+                        }.padding(vertical = 7.dp),
+                        color = if (focusSubjectId == subject.id) colors.word else colors.ink,
+                        fontSize = 14.sp)
+                }
+            Spacer(Modifier.height(11.dp))
+            Text("事项", color = colors.muted, fontSize = 11.sp, letterSpacing = 1.sp)
+            catalog.items.filter { it.subjectId == focusSubjectId }.forEach { item ->
+                Text("${if (focusItemId == item.id) "●" else "○"}  ${item.name}  #${item.id}",
+                    Modifier.fillMaxWidth().clickable { focusItemId = item.id }.padding(vertical = 7.dp),
+                    color = if (focusItemId == item.id) colors.word else colors.ink, fontSize = 14.sp)
+            }
+        }
+        Text("SOURCE / ${FocusReporter.SOURCE}  ·  $focusStatus", color = colors.muted,
+            fontSize = 11.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 14.dp))
+        Spacer(Modifier.height(28.dp))
         Text("模型服务", color = colors.muted, fontSize = 12.sp)
         listOf("DeepSeek 官方", "Command Code GOAT", "自定义").forEach { name ->
             Text(if (selected == name) "●  $name" else "○  $name", Modifier.fillMaxWidth().clickable { selected = name }
@@ -1189,6 +1520,13 @@ private fun SettingsSheet(
     }
     Row(Modifier.fillMaxWidth().height(104.dp)
         .background(colors.glass.copy(alpha = .84f)).clickable {
+            val unchangedFocus = focusUrlInput == settings.focusUrl &&
+                focusSubjectId == settings.focusSubjectId && focusItemId == settings.focusItemId
+            if (focusUrlInput.isNotBlank() && !unchangedFocus &&
+                focusCatalog?.item(focusSubjectId, focusItemId) == null) {
+                focusCatalogStatus = "请先读取目录，并选择相互匹配的科目与事项"
+                return@clickable
+            }
             settings.providerName = selected
             settings.bodySize = bodySize
             settings.lineFactor = lineFactor
@@ -1196,6 +1534,9 @@ private fun SettingsSheet(
             settings.paragraphGap = paragraphGap
             if (selected == "自定义") { settings.customBaseUrl = url; settings.customModel = model }
             if (key.isNotBlank()) settings.saveKey(selected, key)
+            settings.focusUrl = focusUrlInput
+            settings.focusSubjectId = if (focusUrlInput.isBlank()) 0 else focusSubjectId
+            settings.focusItemId = if (focusUrlInput.isBlank()) 0 else focusItemId
             key = ""
             onSave()
         }.padding(horizontal = 26.dp), verticalAlignment = Alignment.CenterVertically) {

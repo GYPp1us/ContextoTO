@@ -80,7 +80,7 @@ class AnalysisEngine(private val content: Content, private val store: UserStore)
         provider: Provider, article: Article, paragraphIndex: Int, token: Token,
         onProgress: (QueryProgress) -> Unit
     ): JSONObject {
-        val paragraph = article.paragraphs[paragraphIndex]
+        val paragraph = if (paragraphIndex < 0) article.title else article.paragraphs[paragraphIndex]
         val lemma = content.lemma(token.text)
         val contextKey = cacheId("word-context", provider, "$lemma|$paragraph|${token.start}")
         cachedWord(provider, paragraph, token)?.let { return it }
@@ -99,7 +99,7 @@ class AnalysisEngine(private val content: Content, private val store: UserStore)
                 ${if (common == null) "同时返回 common_senses 数组（最多 5 个常见义项，每项 zh、part_of_speech），derivatives 数组（最多 4 个真正的派生词，每项 word、relation、zh）。" else "通用义项已经有缓存，不要重复生成；只返回 context_sense。"}
                 上下文义与通用义可以不同；不能机械地选择词典第一义。不要编造派生词。
             """.trimIndent()
-            val user = "文章：${article.title}\n段落：$paragraph\n目标词：${token.text}（段内索引 ${token.start}-${token.end}）\n所在句：${sentence.text}\n预置词典：${lexeme?.translation.orEmpty()}"
+            val user = "文章：${article.title}\n${if (paragraphIndex < 0) "标题" else "段落"}：$paragraph\n目标词：${token.text}（原文索引 ${token.start}-${token.end}）\n所在句：${sentence.text}\n预置词典：${lexeme?.translation.orEmpty()}"
             val response = request(provider, instruction, user, "high", onProgress)
             val parsed = JSONObject(response.text)
             require(parsed.optJSONObject("context_sense")?.optString("zh")?.isNotBlank() == true) { "单词结果缺少本句释义" }
