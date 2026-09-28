@@ -12,13 +12,15 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import org.json.JSONObject
 
 data class ReadingPlace(val articleId: String, val item: Int, val offset: Int)
 data class Provider(val name: String, val baseUrl: String, val model: String, val key: String) {
     val official: Boolean get() = name == "DeepSeek 官方"
 }
+data class AnalysisRecord(val key: String, val kind: String, val payload: JSONObject)
 
-class UserStore(context: Context) : SQLiteOpenHelper(context, "contextoto.db", null, 1) {
+class UserStore(context: Context, databaseName: String = "contextoto.db") : SQLiteOpenHelper(context, databaseName, null, 2) {
     override fun onConfigure(db: SQLiteDatabase) {
         db.enableWriteAheadLogging()
         db.setForeignKeyConstraintsEnabled(true)
@@ -27,8 +29,14 @@ class UserStore(context: Context) : SQLiteOpenHelper(context, "contextoto.db", n
         db.execSQL("CREATE TABLE analysis(cache_key TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL)")
         db.execSQL("CREATE TABLE lookup_event(article_id TEXT NOT NULL, kind TEXT NOT NULL, item_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(article_id,kind,item_id))")
         db.execSQL("CREATE TABLE reading_place(singleton INTEGER PRIMARY KEY CHECK(singleton=1), article_id TEXT NOT NULL, item_index INTEGER NOT NULL, item_offset INTEGER NOT NULL)")
+        createBookmarks(db)
     }
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    private fun createBookmarks(db: SQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS bookmark(article_id TEXT PRIMARY KEY, paragraph_index INTEGER NOT NULL, updated_at INTEGER NOT NULL)")
+    }
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) createBookmarks(db)
+    }
 
     fun getAnalysis(key: String): String? = readableDatabase.rawQuery("SELECT payload FROM analysis WHERE cache_key=?", arrayOf(key)).use {
         if (it.moveToFirst()) it.getString(0) else null
@@ -38,6 +46,25 @@ class UserStore(context: Context) : SQLiteOpenHelper(context, "contextoto.db", n
             put("cache_key", key); put("kind", kind); put("payload", payload); put("created_at", System.currentTimeMillis())
         }
         writableDatabase.insertWithOnConflict("analysis", null, values, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+    fun mergeAnalyses(records: List<AnalysisRecord>) {
+        if (records.isEmpty()) return
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            records.forEach { record ->
+                val previous = db.rawQuery("SELECT payload FROM analysis WHERE cache_key=?", arrayOf(record.key)).use {
+                    if (it.moveToFirst()) runCatching { JSONObject(it.getString(0)) }.getOrNull() else null
+                }
+                val values = ContentValues().apply {
+                    put("cache_key", record.key); put("kind", record.kind)
+                    put("payload", mergeAnalysisPayload(previous, record.payload).toString())
+                    put("created_at", System.currentTimeMillis())
+                }
+                db.insertWithOnConflict("analysis", null, values, SQLiteDatabase.CONFLICT_REPLACE)
+            }
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
     }
     fun recordLookup(articleId: String, kind: String, itemId: String) {
         val values = ContentValues().apply {
@@ -60,6 +87,23 @@ class UserStore(context: Context) : SQLiteOpenHelper(context, "contextoto.db", n
         }
         writableDatabase.insertWithOnConflict("reading_place", null, values, SQLiteDatabase.CONFLICT_REPLACE)
     }
+    fun bookmark(articleId: String): Int = readableDatabase.rawQuery(
+        "SELECT paragraph_index FROM bookmark WHERE article_id=?", arrayOf(articleId)
+    ).use { if (it.moveToFirst()) it.getInt(0) else 0 }
+    fun advanceBookmark(articleId: String, paragraphIndex: Int): Int {
+        if (paragraphIndex < 0) return bookmark(articleId)
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val furthest = maxOf(bookmark(articleId), paragraphIndex)
+            val values = ContentValues().apply {
+                put("article_id", articleId); put("paragraph_index", furthest); put("updated_at", System.currentTimeMillis())
+            }
+            db.insertWithOnConflict("bookmark", null, values, SQLiteDatabase.CONFLICT_REPLACE)
+            db.setTransactionSuccessful()
+            return furthest
+        } finally { db.endTransaction() }
+    }
 }
 
 class SecureSettings(private val context: Context) {
@@ -74,6 +118,12 @@ class SecureSettings(private val context: Context) {
     var silentInference: Boolean
         get() = prefs.getBoolean("silent_inference", false)
         set(value) { prefs.edit().putBoolean("silent_inference", value).apply() }
+    var customStatusBar: Boolean
+        get() = prefs.getBoolean("custom_status_bar", false)
+        set(value) { prefs.edit().putBoolean("custom_status_bar", value).apply() }
+    var bookmarkVisible: Boolean
+        get() = prefs.getBoolean("bookmark_visible", true)
+        set(value) { prefs.edit().putBoolean("bookmark_visible", value).apply() }
     var bodySize: Float
         get() = prefs.getFloat("body_size", 20f).coerceIn(16f, 28f)
         set(value) { prefs.edit().putFloat("body_size", value.coerceIn(16f, 28f)).apply() }

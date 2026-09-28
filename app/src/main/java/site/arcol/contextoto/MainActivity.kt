@@ -38,7 +38,8 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -48,6 +49,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -62,6 +64,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Color
@@ -95,6 +99,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 import java.io.File
@@ -102,16 +107,21 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.ViewModelProvider
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         UpdateChecker.cleanupInterrupted(this)
-        val content = Content(this)
-        val store = UserStore(this)
-        val settings = SecureSettings(this)
-        val engine = AnalysisEngine(content, store)
-        setContent { ReaderApp(content, store, settings, engine) }
+        val model = ViewModelProvider(this)[ReaderViewModel::class.java]
+        setContent { ReaderApp(model.content, model.store, model.settings, model.engine) }
     }
 }
 
@@ -131,7 +141,9 @@ private fun palette(dark: Boolean) = if (dark) Palette(
     Color(0xFF5D7B72), Color(0xFFA87562), Color(0xFF897999), Color(0xFFA48656)
 )
 
-private data class TokenGlyph(val token: Token, val rect: Rect, val baseline: Float, val sizePx: Float, val color: Color)
+private data class GlyphCharacter(val text: String, val rect: Rect, val baseline: Float, val sizePx: Float, val color: Color)
+private data class TokenGlyph(val token: Token, val rect: Rect, val baseline: Float, val sizePx: Float, val color: Color,
+                              val characters: List<GlyphCharacter> = emptyList())
 private data class WordTarget(val paragraphIndex: Int, val token: Token, val anchor: TokenGlyph, val inSentence: Boolean)
 private data class SentenceTarget(val paragraphIndex: Int, val sentence: Sentence, val sourceGlyphs: List<TokenGlyph>)
 private data class ReaderScale(val bodySize: Float, val lineFactor: Float, val sideMargin: Float, val paragraphGap: Float)
@@ -151,6 +163,16 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     var dark by remember { mutableStateOf(settings.dark) }
     var markQueriedWords by remember { mutableStateOf(settings.markQueriedWords) }
     var silentInference by remember { mutableStateOf(settings.silentInference) }
+    var customStatusBar by remember { mutableStateOf(settings.customStatusBar) }
+    var bookmarkVisible by remember { mutableStateOf(settings.bookmarkVisible) }
+    var bookmarkIndex by remember(article.id) { mutableIntStateOf(store.bookmark(article.id).coerceIn(0, article.paragraphs.lastIndex)) }
+    val queryTasks by engine.tasks.collectAsState()
+    val engineRevision by engine.cacheRevision.collectAsState()
+    var clockLabel by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        val clock = SimpleDateFormat("HH:mm", Locale.getDefault())
+        while (true) { clockLabel = clock.format(Date()); delay(10_000) }
+    }
     var focusUrl by remember { mutableStateOf(settings.focusUrl) }
     var focusSubjectId by remember { mutableIntStateOf(settings.focusSubjectId) }
     var focusItemId by remember { mutableIntStateOf(settings.focusItemId) }
@@ -167,17 +189,24 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     }
     var scale by remember { mutableStateOf(ReaderScale(settings.bodySize, settings.lineFactor, settings.sideMargin, settings.paragraphGap)) }
     val colors = palette(dark)
-    SideEffect {
+    DisposableEffect(dark, customStatusBar) {
+        WindowCompat.setDecorFitsSystemWindows(activity.window, false)
         activity.window.statusBarColor = if (dark) android.graphics.Color.rgb(37, 37, 37) else android.graphics.Color.rgb(242, 240, 234)
         activity.window.navigationBarColor = if (dark) android.graphics.Color.rgb(37, 37, 37) else android.graphics.Color.rgb(242, 240, 234)
         activity.window.isNavigationBarContrastEnforced = false
-        activity.window.decorView.systemUiVisibility = if (dark) 0 else android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        WindowInsetsControllerCompat(activity.window, activity.window.decorView).apply {
+            isAppearanceLightStatusBars = !dark
+            isAppearanceLightNavigationBars = !dark
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            if (customStatusBar) hide(WindowInsetsCompat.Type.statusBars()) else show(WindowInsetsCompat.Type.statusBars())
+        }
+        onDispose { }
     }
     var provider by remember { mutableStateOf(settings.provider()) }
     var drawerOpen by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
-    var updateStatus by remember { mutableStateOf("点击检查 GitHub 正式版") }
+    var updateStatus by remember { mutableStateOf("点击检查 GitHub 最新版本") }
     var updateChecking by remember { mutableStateOf(false) }
     var updateOpen by remember { mutableStateOf(false) }
     var updateProgress by remember { mutableStateOf(DownloadProgress(DownloadPhase.CONNECTING)) }
@@ -205,13 +234,14 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                 .map { paragraphIndex to it }
         }.mapIndexed { index, (paragraphIndex, sentence) -> ArticleSentence(paragraphIndex, index + 1, sentence) }
     }
-    val cachedSentences = remember(article.id, provider, cacheEpoch) {
+    val cachedSentences = remember(article.id, provider, cacheEpoch, engineRevision) {
         articleSentences.mapNotNull { item -> engine.cachedSentence(provider, item.sentence.text)?.let {
             CachedSentence(item, it.optString("translation_zh"))
         } }
     }
     val silentPercent = if (articleSentences.isEmpty()) 100 else cachedSentences.size * 100 / articleSentences.size
-    val percentLabel = "$silentPercent%"
+    val activeQuery = queryTasks.firstOrNull { it.status == QueryStatus.RUNNING && !it.silent }
+    val percentLabel = "${activeQuery?.percent ?: silentPercent}%"
     var silentRun by remember(article.id, provider) { mutableStateOf(SilentRunState()) }
     var silentOpen by remember { mutableStateOf(false) }
     var percentAnchor by remember { mutableStateOf<TokenGlyph?>(null) }
@@ -233,25 +263,40 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
             percentMotion.animateTo(0f, tween(310, easing = FastOutSlowInEasing))
         }
     }
-    LaunchedEffect(sentenceOpen) { if (sentenceOpen != null) lastSentence = sentenceOpen }
-    LaunchedEffect(wordTarget) { if (wordTarget != null) lastWord = wordTarget }
-    LaunchedEffect(sentenceOpen, sentenceDestination.isNotEmpty()) {
-        if (sentenceOpen != null && sentenceDestination.isNotEmpty()) {
+    LaunchedEffect(sentenceOpen) {
+        if (sentenceOpen != null) {
+            lastSentence = sentenceOpen
+            sentenceMotion.snapTo(0f)
+            snapshotFlow { sentenceDestination }.first { it.isNotEmpty() }
             sentenceMotion.animateTo(1f, tween(520, easing = FastOutSlowInEasing))
-        } else if (sentenceOpen == null) {
+        } else {
             sentenceMotion.animateTo(0f, tween(330, easing = FastOutSlowInEasing))
         }
     }
-    LaunchedEffect(wordTarget, wordDestination != null) {
-        if (wordTarget != null && wordDestination != null) {
+    LaunchedEffect(wordTarget) {
+        if (wordTarget != null) {
+            lastWord = wordTarget
+            wordMotion.snapTo(0f)
+            snapshotFlow { wordDestination }.first { it != null }
             wordMotion.animateTo(1f, tween(420, easing = FastOutSlowInEasing))
-        } else if (wordTarget == null) {
+        } else {
             wordMotion.animateTo(0f, tween(310, easing = FastOutSlowInEasing))
         }
     }
     val savedItem = if (article.id == initial?.articleId) initial.item else 0
     val savedOffset = if (article.id == initial?.articleId) initial.offset else 0
     val listState = remember(article.id) { androidx.compose.foundation.lazy.LazyListState(savedItem, savedOffset) }
+    val readerScope = rememberCoroutineScope()
+    fun advanceBookmark(index: Int) {
+        if (index > bookmarkIndex && index in article.paragraphs.indices) {
+            bookmarkIndex = store.advanceBookmark(article.id, index)
+        }
+    }
+    LaunchedEffect(article.id, listState, bookmarkIndex) {
+        snapshotFlow { listState.firstVisibleItemIndex }.distinctUntilChanged().collect { first ->
+            if (first > bookmarkIndex + 1) advanceBookmark((first - 1).coerceAtMost(article.paragraphs.lastIndex))
+        }
+    }
 
     LaunchedEffect(article.id) {
         silentOpen = false
@@ -346,7 +391,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
             if (engine.cachedSentence(provider, item.sentence.text) != null) continue
             silentRun = SilentRunState(active = item, running = true)
             try {
-                engine.sentence(provider, article, item.sentence) { progress ->
+                engine.sentence(provider, article, item.sentence, silent = true) { progress ->
                     silentRun = silentRun.copy(progress = progress)
                 }
                 cacheEpoch++
@@ -366,18 +411,23 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         val text = if (target.paragraphIndex < 0) article.title
             else article.paragraphs.getOrNull(target.paragraphIndex) ?: return@LaunchedEffect
         val cached = engine.cachedWord(provider, text, target.token)
-        if (cached != null) {
-            wordResult = cached
+        wordResult = cached
+        if (engine.wordComplete(provider, text, target.token)) {
             store.recordLookup(article.id, "word", content.lemma(target.token.text)); lookupEpoch++
         } else if (provider.key.isBlank()) {
-            wordError = "尚未配置 API Key，可先查看预置词典。"
+            val missing = cached?.optJSONArray("_missing_modules")
+            wordError = if (cached == null) "尚未配置 API Key，可先查看预置词典。" else
+                "已有缓存已保留；待补${(0 until (missing?.length() ?: 0)).joinToString("、") { missing?.optString(it).orEmpty() }}。配置 API Key 后只查询缺项。"
         } else {
-            runCatching {
-                engine.word(provider, article, target.paragraphIndex, target.token) { wordProgress = it }
-            }.onSuccess {
-                wordResult = it; wordProgress = null
+            try {
+                wordResult = engine.word(provider, article, target.paragraphIndex, target.token) { wordProgress = it }
+                wordProgress = null
                 store.recordLookup(article.id, "word", content.lemma(target.token.text)); lookupEpoch++
-            }.onFailure { wordError = readableQueryError(it); wordProgress = null }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                wordResult = engine.cachedWord(provider, text, target.token)
+                wordError = readableQueryError(error); wordProgress = null
+            }
         }
     }
     LaunchedEffect(sentenceOpen, retrySentence, provider) {
@@ -391,12 +441,14 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         } else if (provider.key.isBlank()) {
             sentenceError = "尚未配置 API Key。英文原句仍可阅读。"
         } else {
-            runCatching { engine.sentence(provider, article, target.sentence) { sentenceProgress = it } }
-                .onSuccess {
-                    sentenceResult = it; sentenceProgress = null
+            store.recordLookup(article.id, "sentence", "${target.paragraphIndex}:${target.sentence.start}"); lookupEpoch++
+            try {
+                    sentenceResult = engine.sentence(provider, article, target.sentence) { sentenceProgress = it }
+                    sentenceProgress = null
                     store.recordLookup(article.id, "sentence", "${target.paragraphIndex}:${target.sentence.start}"); lookupEpoch++
                     cacheEpoch++
-                }.onFailure { sentenceError = readableQueryError(it); sentenceProgress = null }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { sentenceError = readableQueryError(error); sentenceProgress = null }
         }
     }
 
@@ -404,12 +456,15 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     val blur by animateFloatAsState(if (hasOverlay) 26f else 0f, tween(290, easing = FastOutSlowInEasing), label = "body blur")
     val updateBlur by animateFloatAsState(if (updateOpen) 26f else 0f,
         tween(290, easing = FastOutSlowInEasing), label = "settings blur")
+    val currentWordMotion = if (wordTarget != null && wordTarget != lastWord) 0f else wordMotion.value
+    val currentSentenceMotion = if (sentenceOpen != null && sentenceOpen != lastSentence) 0f else sentenceMotion.value
 
     BoxWithConstraints(Modifier.fillMaxSize().background(colors.paper)) {
         val width = maxWidth
         val height = maxHeight
         val density = LocalDensity.current
-        val topReserve = with(density) { (scale.bodySize * scale.lineFactor * .8f).sp.toDp() }
+        val safeTop = with(density) { WindowInsets.safeDrawing.getTop(this).toDp() }
+        val topReserve = safeTop + if (customStatusBar) 8.dp else with(density) { (scale.bodySize * scale.lineFactor * .8f).sp.toDp() }
         val drawerShift by animateFloatAsState(if (drawerOpen) with(density) { (width * .60f).toPx() } else 0f,
             tween(340, easing = FastOutSlowInEasing), label = "drawer shift")
         Box(Modifier.fillMaxSize().pointerInput(article.id, hasOverlay) {
@@ -427,9 +482,20 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                 Row(Modifier.fillMaxWidth().padding(start = scale.sideMargin.dp, end = scale.sideMargin.dp, top = 22.dp, bottom = 18.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Text("≡", Modifier.clickable { drawerOpen = true }.padding(end = 18.dp), color = colors.ink, fontSize = 27.sp)
-                    Text("ContextoTO", color = colors.ink, fontFamily = ReadingFont, fontSize = 19.sp)
-                    Spacer(Modifier.weight(1f))
-                    Text(article.id.uppercase(), color = colors.muted, fontSize = 12.sp, fontFamily = ReadingFont)
+                    if (customStatusBar) {
+                        Column(Modifier.weight(1f)) {
+                            Text(smallCapsTitle(article.title, 14f), color = colors.ink, fontFamily = ReadingFont,
+                                fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Row(Modifier.padding(top = 5.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Text("$clockLabel · ${article.id.uppercase()}", color = colors.muted, fontSize = 10.sp)
+                                FocusStatusLabel(focusStatus, colors) { settingsOpen = true }
+                            }
+                        }
+                    } else {
+                        Text("ContextoTO", color = colors.ink, fontFamily = ReadingFont, fontSize = 19.sp)
+                        Spacer(Modifier.weight(1f))
+                        Text(article.id.uppercase(), color = colors.muted, fontSize = 12.sp, fontFamily = ReadingFont)
+                    }
                     Spacer(Modifier.width(12.dp))
                     Box(Modifier.width(58.dp).height(42.dp).clickable {
                         flightPercent = percentLabel
@@ -454,18 +520,31 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                         fontFamily = ReadingFont, fontSize = 12.sp)
                     }
                 }
+                Row(Modifier.fillMaxWidth().padding(horizontal = scale.sideMargin.dp).padding(bottom = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    if (!customStatusBar) FocusStatusLabel(focusStatus, colors) { settingsOpen = true }
+                    if (customStatusBar) Text("沉浸阅读", color = colors.muted, fontSize = 10.sp)
+                    Spacer(Modifier.weight(1f))
+                    Text(if (activeQuery != null) "查询进度（估算）" else "句子缓存", color = colors.muted, fontSize = 10.sp)
+                    Spacer(Modifier.width(16.dp))
+                    Text("书签 · ${bookmarkIndex + 1}段", Modifier.clickable {
+                        readerScope.launch { listState.animateScrollToItem(bookmarkIndex + 1) }
+                    }, color = colors.word, fontSize = 10.sp)
+                }
+                Box(Modifier.weight(1f).fillMaxWidth().clipToBounds()) {
+                if (bookmarkVisible) BookmarkBackdrop(listState, bookmarkIndex, scale, colors)
                 LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     start = scale.sideMargin.dp, end = scale.sideMargin.dp, bottom = 64.dp
                 )) {
-                    item {
+                    item(key = "title") {
                         Text("READING / ${articleIndex + 1} OF 48", color = colors.word, fontSize = 11.sp,
                             fontWeight = FontWeight.Bold, letterSpacing = 1.6.sp)
                         Spacer(Modifier.height(10.dp))
                         val sourceSentence = sentenceOpen ?: lastSentence.takeIf { sentenceMotion.value > .001f }
                         val sourceWord = wordTarget ?: lastWord.takeIf { wordMotion.value > .001f }
                         val hidden = when {
-                            sourceSentence?.paragraphIndex == -1 -> sourceSentence.sentence.start to sourceSentence.sentence.end
-                            sourceWord?.paragraphIndex == -1 && !sourceWord.inSentence ->
+                            sourceSentence?.paragraphIndex == -1 && sentenceDestination.isNotEmpty() -> sourceSentence.sentence.start to sourceSentence.sentence.end
+                            sourceWord?.paragraphIndex == -1 && !sourceWord.inSentence && wordDestination != null ->
                                 sourceWord.token.start to sourceWord.token.end
                             else -> null
                         }
@@ -486,13 +565,13 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                             }, hidden = hidden, titleMode = true)
                         Spacer(Modifier.height(28.dp))
                     }
-                    itemsIndexed(article.paragraphs) { index, text ->
+                    itemsIndexed(article.paragraphs, key = { index, _ -> "paragraph-$index" }) { index, text ->
                         val sourceSentence = sentenceOpen ?: lastSentence.takeIf { sentenceMotion.value > .001f }
                         val sourceWord = wordTarget ?: lastWord.takeIf { wordMotion.value > .001f }
                         val hidden = when {
-                            sourceSentence?.paragraphIndex == index ->
+                            sourceSentence?.paragraphIndex == index && sentenceDestination.isNotEmpty() ->
                                 sourceSentence.sentence.start to sourceSentence.sentence.end
-                            sourceWord?.paragraphIndex == index && !sourceWord.inSentence ->
+                            sourceWord?.paragraphIndex == index && !sourceWord.inSentence && wordDestination != null ->
                                 sourceWord.token.start to sourceWord.token.end
                             else -> null
                         }
@@ -500,10 +579,12 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                             if (markQueriedWords) store.queriedWords(article.id) else emptySet(), scale,
                             Modifier.fillMaxWidth().padding(bottom = scale.paragraphGap.dp),
                             onWord = { token, anchor ->
+                                advanceBookmark(index)
                                 wordDestination = null
                                 wordTarget = WordTarget(index, token, anchor, false)
                             },
                             onLongWord = { token, glyphs ->
+                                advanceBookmark(index)
                                 val sentence = Content.sentenceAt(text, token.start)
                                 sentenceDestination = emptyList()
                                 sentenceOpen = SentenceTarget(index, sentence, glyphs.map { glyph ->
@@ -514,13 +595,14 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                             }, hidden = hidden)
                     }
                 }
+                }
             }
         }
         if (drawerOpen) GlassScrim(colors) { drawerOpen = false }
         AnimatedVisibility(drawerOpen, Modifier.align(Alignment.CenterStart),
             enter = fadeIn(tween(220)) + slideInHorizontally(tween(340, easing = FastOutSlowInEasing)) { -it / 5 },
             exit = fadeOut(tween(200)) + slideOutHorizontally(tween(290, easing = FastOutSlowInEasing)) { -it / 5 }) {
-            ArticleDrawer(content, store, article.id, lookupEpoch, colors,
+            ArticleDrawer(content, store, article.id, lookupEpoch + engineRevision, colors,
                 Modifier.width(width * .80f).fillMaxHeight().navigationBarsPadding().padding(top = topReserve),
                 onSelect = { index ->
                     articleIndex = index; wordTarget = null; sentenceOpen = null; drawerOpen = false
@@ -540,12 +622,13 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                     renderEffect = if (secondBlur > .1f) BlurEffect(secondBlur, secondBlur, TileMode.Clamp) else null
                 }) {
                     SentenceSheet(article, activeSentence, sentenceResult, sentenceProgress, sentenceError,
-                        content, store, colors, scale, markQueriedWords, sentenceMotion.value,
-                        (wordTarget ?: lastWord.takeIf { wordMotion.value > .001f })?.takeIf { it.inSentence },
+                        content, store, colors, scale, markQueriedWords, currentSentenceMotion,
+                        (wordTarget ?: lastWord.takeIf { wordMotion.value > .001f })?.takeIf { it.inSentence && wordDestination != null },
                         Modifier.align(Alignment.TopCenter).offset(y = sentenceY).fillMaxWidth()
                             .heightIn(max = height - sentenceY - 18.dp),
                         onGeometry = { sentenceDestination = it },
                         onWord = { token, anchor ->
+                            advanceBookmark(activeSentence.paragraphIndex)
                             val absolute = Token(token.text, token.start + activeSentence.sentence.start,
                                 token.end + activeSentence.sentence.start)
                             wordDestination = null
@@ -562,7 +645,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         AnimatedVisibility(wordTarget != null,
             enter = fadeIn(tween(160)), exit = fadeOut(tween(310))) {
             if (displayWord != null) WordSheet(displayWord, article, content, wordResult, wordProgress, wordError, colors,
-                maxWidth, maxHeight, topReserve, wordMotion.value, onTitleGeometry = { wordDestination = it },
+                maxWidth, maxHeight, topReserve, currentWordMotion, onTitleGeometry = { wordDestination = it },
                 onRetry = { retryWord++ }, onConfigure = {
                     wordTarget = null; sentenceOpen = null; settingsOpen = true
                 })
@@ -570,11 +653,11 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
 
         val flightSentence = sentenceOpen ?: lastSentence
         if (flightSentence != null && sentenceDestination.isNotEmpty()) {
-            MotionGlyphs(flightSentence.sourceGlyphs, sentenceDestination, sentenceMotion.value, sentenceOpen != null)
+            MotionGlyphs(flightSentence.sourceGlyphs, sentenceDestination, currentSentenceMotion, sentenceOpen != null)
         }
         val flightWord = wordTarget ?: lastWord
         if (flightWord != null && wordDestination != null) {
-            MotionGlyphs(listOf(flightWord.anchor), listOf(wordDestination!!), wordMotion.value, wordTarget != null)
+            MotionGlyphs(listOf(flightWord.anchor), listOf(wordDestination!!), currentWordMotion, wordTarget != null)
         }
 
         if (silentOpen) GlassScrim(colors) {
@@ -584,7 +667,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         }
         AnimatedVisibility(silentOpen, enter = fadeIn(tween(160)), exit = fadeOut(tween(310))) {
             SilentSheet(article, articleSentences, cachedSentences, silentRun, silentInference,
-                provider.key.isNotBlank(),
+                provider.key.isNotBlank(), queryTasks,
                 if (percentMotion.value < 1f) flightPercent else percentLabel,
                 colors, maxWidth, maxHeight, topReserve, percentMotion.value,
                 onPercentGeometry = { percentDestination = it }, onRetry = { retrySilent++ })
@@ -595,15 +678,17 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
 
         if (settingsOpen) {
             GlassScrim(colors) { settingsOpen = false }
-            SettingsSheet(colors, dark, markQueriedWords, silentInference, provider, settings,
+            SettingsSheet(colors, dark, markQueriedWords, silentInference, customStatusBar, bookmarkVisible, provider, settings,
                 updateStatus, updateInfo, updateChecking, focusStatus,
-                Modifier.align(Alignment.TopCenter).fillMaxSize().statusBarsPadding()
+                Modifier.align(Alignment.TopCenter).fillMaxSize()
                     .navigationBarsPadding().padding(top = topReserve).graphicsLayer {
                         renderEffect = if (updateBlur > .1f) BlurEffect(updateBlur, updateBlur, TileMode.Clamp) else null
                     },
                 onDark = { dark = it; settings.dark = it },
                 onMarkQueriedWords = { markQueriedWords = it; settings.markQueriedWords = it },
                 onSilentInference = { silentInference = it; settings.silentInference = it },
+                onCustomStatusBar = { customStatusBar = it; settings.customStatusBar = it },
+                onBookmarkVisible = { bookmarkVisible = it; settings.bookmarkVisible = it },
                 onCheckUpdate = {
                     if (!updateChecking) updateScope.launch {
                         updateChecking = true
@@ -667,6 +752,59 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     }
 }
 
+@Composable
+private fun FocusStatusLabel(status: String, colors: Palette, onClick: () -> Unit) {
+    val active = status.startsWith("正在记录")
+    val label = when {
+        active -> "专注 · 已上报"
+        status.contains("冲突") -> "专注 · 冲突"
+        status.contains("连接中断") || status.contains("失败") || status.contains("不可用") -> "专注 · 离线"
+        status.contains("连接") -> "专注 · 连接中"
+        status.contains("暂停") -> "专注 · 暂停"
+        status.contains("未配置") -> "专注 · 未配置"
+        else -> "专注 · 不可用"
+    }
+    Text("${if (active) "●" else "○"} $label", Modifier.clickable(onClick = onClick),
+        color = if (active) colors.word else colors.muted, fontSize = 10.sp)
+}
+
+@Composable
+private fun BookmarkBackdrop(list: androidx.compose.foundation.lazy.LazyListState, index: Int,
+                             scale: ReaderScale, colors: Palette) {
+    val density = LocalDensity.current
+    val gap = with(density) { scale.paragraphGap.dp.toPx() }
+    var displayed by remember { mutableIntStateOf(index) }
+    var previous by remember { mutableIntStateOf(index) }
+    var previousHeight by remember { mutableStateOf(160f) }
+    val travel = remember { Animatable(1f) }
+    LaunchedEffect(index) {
+        if (displayed != index) {
+            previous = displayed
+            displayed = index
+            travel.snapTo(0f)
+            travel.animateTo(1f, tween(560, easing = FastOutSlowInEasing))
+        }
+    }
+    val info = list.layoutInfo
+    val target = info.visibleItemsInfo.firstOrNull { it.key == "paragraph-$index" }
+    val source = info.visibleItemsInfo.firstOrNull { it.key == "paragraph-$previous" }
+    val targetHeight = target?.let { (it.size - gap).coerceAtLeast(40f) } ?: previousHeight
+    SideEffect { if (travel.value >= 1f && target != null) previousHeight = targetHeight }
+    if (target != null) Canvas(Modifier.fillMaxSize()) {
+        val fromHeight = source?.let { (it.size - gap).coerceAtLeast(40f) } ?: previousHeight
+        val fromY = source?.offset?.toFloat() ?: if (previous + 1 < list.firstVisibleItemIndex)
+            -fromHeight else info.viewportEndOffset.toFloat()
+        val fraction = travel.value
+        val top = fromY + (target.offset - fromY) * fraction
+        val height = fromHeight + (targetHeight - fromHeight) * fraction
+        val horizontal = (scale.sideMargin - 8f).coerceAtLeast(4f).dp.toPx()
+        // Draw the full paragraph rectangle, including content outside the viewport. A sized child
+        // would be constrained to the screen and incorrectly truncate very long paragraphs.
+        drawRoundRect(colors.word.copy(alpha = .075f), Offset(horizontal, top - 6.dp.toPx()),
+            Size(size.width - horizontal * 2, height + 12.dp.toPx()), CornerRadius(14.dp.toPx()))
+    }
+}
+
 private fun readableQueryError(error: Throwable): String = when {
     error is java.net.SocketTimeoutException || error.message?.contains("timeout", ignoreCase = true) == true ->
         "模型等待超时，可能仍在排队或推理。请稍后重试。"
@@ -680,32 +818,45 @@ private fun GlassScrim(colors: Palette, onDismiss: () -> Unit) {
     Box(Modifier.fillMaxSize().background(colors.glass).clickable(onClick = onDismiss))
 }
 
+private fun measuredGlyph(token: Token, visible: AnnotatedString, layout: TextLayoutResult, position: Offset,
+                          fontPx: Float, fontSp: Float, ink: Color): TokenGlyph {
+    val characters = (token.start until token.end).map { index ->
+        val box = layout.getBoundingBox(index)
+        // Color and size are independent styles: a small-caps size span has no color.
+        val color = resolveGlyphColor(visible, index, ink)
+        val size = resolveGlyphSize(visible, index, fontSp)
+        GlyphCharacter(visible.text.substring(index, index + 1),
+            Rect(box.left + position.x, box.top + position.y, box.right + position.x, box.bottom + position.y),
+            layout.getLineBaseline(layout.getLineForOffset(index)) + position.y,
+            fontPx * size / fontSp, color)
+    }
+    val rect = Rect(characters.minOf { it.rect.left }, characters.minOf { it.rect.top },
+        characters.maxOf { it.rect.right }, characters.maxOf { it.rect.bottom })
+    return TokenGlyph(token, rect, characters.first().baseline, fontPx, characters.first().color, characters)
+}
+
 @Composable
 private fun InteractiveParagraph(
     text: String, colors: Palette, analysis: JSONObject?, content: Content, queried: Set<String>,
     scale: ReaderScale, modifier: Modifier = Modifier, onWord: (Token, TokenGlyph) -> Unit,
     onLongWord: (Token, List<TokenGlyph>) -> Unit,
     onGeometry: ((List<TokenGlyph>) -> Unit)? = null, hidden: Pair<Int, Int>? = null,
-    titleMode: Boolean = false
+    titleMode: Boolean = false, titleFirstLarge: Boolean = true
 ) {
     var result by remember(text) { mutableStateOf<TextLayoutResult?>(null) }
     var position by remember(text) { mutableStateOf(Offset.Zero) }
     val fontPx = with(LocalDensity.current) { scale.bodySize.sp.toPx() }
-    val annotated = remember(text, analysis, queried, colors, hidden, titleMode, scale.bodySize) {
-        annotateParagraph(text, analysis, content, queried, colors, hidden,
-            if (titleMode) scale.bodySize else null)
+    val visible = remember(text, analysis, queried, colors, titleMode, titleFirstLarge, scale.bodySize) {
+        annotateParagraph(text, analysis, content, queried, colors, null,
+            if (titleMode) scale.bodySize else null, titleFirstLarge)
     }
+    val annotated = remember(visible, hidden) { buildAnnotatedString {
+        append(visible)
+        if (hidden != null && hidden.first in 0 until hidden.second && hidden.second <= text.length)
+            addStyle(SpanStyle(color = Color.Transparent), hidden.first, hidden.second)
+    } }
     fun glyph(token: Token, layout: TextLayoutResult): TokenGlyph {
-        val first = layout.getBoundingBox(token.start)
-        val last = layout.getBoundingBox(token.end - 1)
-        val style = annotated.spanStyles.lastOrNull { token.start in it.start until it.end }
-        val displayToken = if (titleMode) token.copy(text = token.text.uppercase()) else token
-        val glyphSize = if (titleMode && token.start != text.indexOfFirst { it.isLetter() } &&
-            text[token.start].isLowerCase()) fontPx * .78f else fontPx
-        return TokenGlyph(displayToken, Rect(first.left + position.x, first.top + position.y,
-            last.right + position.x, first.bottom + position.y),
-            layout.getLineBaseline(layout.getLineForOffset(token.start)) + position.y,
-            glyphSize, style?.item?.color ?: colors.ink)
+        return measuredGlyph(token, visible, layout, position, fontPx, scale.bodySize, colors.ink)
     }
     Text(annotated, modifier.onGloballyPositioned {
         position = it.positionInRoot()
@@ -729,7 +880,9 @@ private fun InteractiveParagraph(
                         .map { glyph(it, layout) })
                 }
             )
-        }, onTextLayout = { result = it }, color = colors.ink, fontFamily = ReadingFont,
+        }, onTextLayout = { result = it
+            onGeometry?.invoke(Content.tokens(text).map { token -> glyph(token, it) })
+        }, color = colors.ink, fontFamily = ReadingFont,
         fontSize = scale.bodySize.sp, lineHeight = (scale.bodySize * scale.lineFactor).sp)
 }
 
@@ -746,6 +899,16 @@ private fun MotionGlyphs(source: List<TokenGlyph>, destination: List<TokenGlyph>
                 val to = targetByStart[from.token.start] ?: return@forEachIndexed
                 val stagger = (index * .018f).coerceAtMost(.25f)
                 val t = ((progress - stagger) / (1f - stagger)).coerceIn(0f, 1f)
+                if (from.characters.isNotEmpty() && from.characters.size == to.characters.size) {
+                    from.characters.zip(to.characters).forEach { (sourceChar, targetChar) ->
+                        paint.color = lerp(sourceChar.color, targetChar.color, t).toArgb()
+                        paint.textSize = sourceChar.sizePx + (targetChar.sizePx - sourceChar.sizePx) * t
+                        canvas.nativeCanvas.drawText(sourceChar.text,
+                            sourceChar.rect.left + (targetChar.rect.left - sourceChar.rect.left) * t,
+                            sourceChar.baseline + (targetChar.baseline - sourceChar.baseline) * t, paint)
+                    }
+                    return@forEachIndexed
+                }
                 paint.color = lerp(from.color, to.color, t).toArgb()
                 paint.alpha = 255
                 paint.textSize = from.sizePx + (to.sizePx - from.sizePx) * t
@@ -778,9 +941,10 @@ private fun RevealElement(order: Int, revealKey: Any, modifier: Modifier = Modif
 }
 
 private fun annotateParagraph(text: String, analysis: JSONObject?, content: Content, queried: Set<String>,
-                              colors: Palette, hidden: Pair<Int, Int>?, titleSize: Float? = null): AnnotatedString =
+                              colors: Palette, hidden: Pair<Int, Int>?, titleSize: Float? = null,
+                              titleFirstLarge: Boolean = true): AnnotatedString =
     buildAnnotatedString {
-        if (titleSize != null) append(smallCapsTitle(text, titleSize)) else append(text)
+        if (titleSize != null) append(smallCapsTitle(text, titleSize, titleFirstLarge)) else append(text)
         for (token in Content.tokens(text)) {
             val lemma = content.lemma(token.text)
             if (lemma in queried) addStyle(SpanStyle(color = colors.paragraph), token.start, token.end)
@@ -797,12 +961,12 @@ private fun annotateParagraph(text: String, analysis: JSONObject?, content: Cont
         }
     }
 
-private fun smallCapsTitle(title: String, fullSize: Float): AnnotatedString = buildAnnotatedString {
+private fun smallCapsTitle(title: String, fullSize: Float, firstLarge: Boolean = true): AnnotatedString = buildAnnotatedString {
     val firstLetter = title.indexOfFirst { it.isLetter() }
     title.forEachIndexed { index, char ->
         val start = length
         append(if (char.isLowerCase()) char.uppercaseChar() else char)
-        if (char.isLowerCase() && index != firstLetter) {
+        if (char.isLowerCase() && (index != firstLetter || !firstLarge)) {
             addStyle(SpanStyle(fontSize = (fullSize * .78f).sp), start, length)
         }
     }
@@ -857,7 +1021,7 @@ private fun ArticleDrawer(
 @Composable
 private fun SilentSheet(
     article: Article, sentences: List<ArticleSentence>, cached: List<CachedSentence>, run: SilentRunState,
-    enabled: Boolean, hasKey: Boolean, percent: String, colors: Palette, screenWidth: androidx.compose.ui.unit.Dp,
+    enabled: Boolean, hasKey: Boolean, tasks: List<QueryTask>, percent: String, colors: Palette, screenWidth: androidx.compose.ui.unit.Dp,
     screenHeight: androidx.compose.ui.unit.Dp, topReserve: androidx.compose.ui.unit.Dp, motion: Float,
     onPercentGeometry: (TokenGlyph) -> Unit, onRetry: () -> Unit
 ) {
@@ -873,7 +1037,7 @@ private fun SilentSheet(
         .width(panelWidth).height(panelHeight).navigationBarsPadding().padding(horizontal = 5.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
             RevealElement(0, article.id) {
-                Text("SILENT / ${article.id.uppercase()}", color = colors.word,
+                Text("TASKS / ${article.id.uppercase()}", color = colors.word,
                     fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.6.sp,
                     modifier = Modifier.padding(top = 15.dp))
             }
@@ -895,7 +1059,7 @@ private fun SilentSheet(
         }
         Spacer(Modifier.height(13.dp))
         RevealElement(1, article.id) {
-            Text("静默推理", color = colors.ink, fontFamily = FontFamily.Serif,
+            Text("后台查询与缓存", color = colors.ink, fontFamily = FontFamily.Serif,
                 fontSize = 27.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(8.dp))
@@ -942,10 +1106,42 @@ private fun SilentSheet(
             .padding(top = 12.dp), color = colors.word, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(24.dp))
         RevealElement(4, article.id) {
-            Text("已缓存内容", color = colors.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            Text("查询记录 / 已缓存内容", color = colors.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(10.dp))
         Column(Modifier.weight(1f).fillMaxWidth().clipToBounds().verticalScroll(rememberScrollState())) {
+            val manual = tasks.filter { !it.silent }.take(6)
+            if (manual.isNotEmpty()) {
+                Text("查询任务", color = colors.word, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("关闭浮层不取消请求；阶段百分比为估算，写入缓存后才是 100%。", color = colors.muted,
+                    fontSize = 11.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 5.dp, bottom = 16.dp))
+                manual.forEach { task ->
+                    Column(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
+                        Row(verticalAlignment = Alignment.Top) {
+                            Text("${task.articleId.uppercase()} · ${task.label}", color = colors.ink,
+                                fontFamily = ReadingFont, fontSize = 17.sp, maxLines = 2,
+                                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            Spacer(Modifier.width(12.dp))
+                            Text("${task.percent}%", color = colors.word, fontFamily = ReadingFont, fontSize = 17.sp)
+                        }
+                        val tokens = task.progress.exactReasoningTokens ?: task.progress.approximateReasoningTokens
+                        val detail = when (task.status) {
+                            QueryStatus.COMPLETE -> "已写入缓存"
+                            QueryStatus.FAILED -> task.error ?: "查询失败"
+                            QueryStatus.RUNNING -> when (task.progress.phase) {
+                                QueryPhase.CONTEXT -> "检查模块 / 拼接上下文"
+                                QueryPhase.FIRST -> "等待首字返回 · 已推理约 $tokens tokens"
+                                QueryPhase.STREAM -> "接收完整结果 · 已推理约 $tokens tokens"
+                                QueryPhase.COMPLETE -> "校验结果 / 合并缓存"
+                            }
+                        }
+                        Text(detail, color = if (task.status == QueryStatus.FAILED) colors.paragraph else colors.muted,
+                            fontSize = 11.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 6.dp))
+                    }
+                }
+                Text("句子缓存", color = colors.word, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(bottom = 13.dp))
+            }
             if (cached.isEmpty()) Text("完成的句子会显示在这里。", color = colors.muted,
                 fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
             cached.forEach { entry ->
@@ -992,7 +1188,7 @@ private fun SentenceSheet(
             onWord = onWord, onLongWord = { _, _ -> }, onGeometry = onGeometry,
             hidden = nestedWord?.let { (it.token.start - target.sentence.start) to
                 (it.token.end - target.sentence.start) },
-            titleMode = target.paragraphIndex < 0)
+            titleMode = target.paragraphIndex < 0, titleFirstLarge = target.sentence.start == 0)
         Spacer(Modifier.height(25.dp))
         if (result != null) {
             RevealElement(1, result) {
@@ -1090,27 +1286,25 @@ private fun WordSheet(
     val y by animateDpAsState(targetY, tween(260, easing = FastOutSlowInEasing), label = "word sheet y")
     val lexeme = content.lexeme(target.token.text)
     var titleLayout by remember(target) { mutableStateOf<TextLayoutResult?>(null) }
+    val title = if (target.paragraphIndex < 0) smallCapsTitle(target.token.text, 42f,
+        target.token.start == article.title.indexOfFirst { it.isLetter() }) else AnnotatedString(target.token.text)
     Column(Modifier.offset(x = x, y = y).width(panelWidth).heightIn(max = maxSheetHeight)
-        .navigationBarsPadding()
         .onSizeChanged { if (measuredHeightPx != it.height) measuredHeightPx = it.height }
+        .navigationBarsPadding()
         .verticalScroll(rememberScrollState()).padding(horizontal = 5.dp, vertical = 10.dp)) {
         RevealElement(0, target) {
             Text("WORD / ${article.id.uppercase()}", color = colors.word, fontSize = 11.sp,
                 fontWeight = FontWeight.Bold, letterSpacing = 1.7.sp)
         }
         Spacer(Modifier.height(8.dp))
-        Text(if (target.paragraphIndex < 0) smallCapsTitle(target.token.text, 42f)
-            else AnnotatedString(target.token.text), modifier = Modifier.graphicsLayer {
+        Text(title, modifier = Modifier.graphicsLayer {
             alpha = if (motion >= 1f) 1f else 0f
         }.onGloballyPositioned { coordinates ->
             val layout = titleLayout ?: return@onGloballyPositioned
             val position = coordinates.positionInRoot()
-            val box = layout.getBoundingBox(0)
             val size = with(density) { 42.sp.toPx() }
-            onTitleGeometry(TokenGlyph(target.token,
-                Rect(position.x + box.left, position.y + box.top,
-                    position.x + layout.getBoundingBox(target.token.text.length - 1).right, position.y + box.bottom),
-                position.y + layout.getLineBaseline(0), size, colors.ink))
+            onTitleGeometry(measuredGlyph(Token(target.token.text, 0, target.token.text.length), title, layout,
+                position, size, 42f, colors.ink).copy(token = target.token))
         }, onTextLayout = { titleLayout = it }, color = colors.ink, fontFamily = ReadingFont,
             fontSize = 42.sp, lineHeight = 47.sp, fontWeight = FontWeight.Normal)
         Spacer(Modifier.height(5.dp))
@@ -1118,8 +1312,21 @@ private fun WordSheet(
             Text(labelsFor(lexeme).joinToString("   ·   ").ifBlank { "语境词" }, color = colors.word,
                 fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = .3.sp)
         }
+        val phonetics = result?.optJSONObject("phonetics")
+        if (phonetics != null) RevealElement(2, phonetics.toString()) {
+            Column(Modifier.fillMaxWidth().padding(top = 9.dp)) {
+                listOf("uk", "us").forEach { accent ->
+                    if (phonetics.optString(accent).isNotBlank()) Row(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
+                        Text(accent.uppercase(), color = colors.word, fontSize = 10.sp,
+                            modifier = Modifier.width(30.dp).padding(top = 3.dp))
+                        Text(phonetics.optString(accent), color = colors.muted, fontFamily = ReadingFont,
+                            fontSize = 15.sp, modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        }
         Spacer(Modifier.height(25.dp))
-        if (result != null) {
+        if (result != null && result.optJSONObject("context_sense") != null) {
             val contextSense = result.optJSONObject("context_sense")
             RevealElement(2, result) {
                 Text("01  本句取义", color = colors.muted, fontSize = 11.sp, fontWeight = FontWeight.Bold,
@@ -1193,7 +1400,11 @@ private fun WordSheet(
         if (lexeme == null && result == null) RevealElement(5, target) {
             Text("不在预置词表中", color = colors.muted, fontSize = 13.sp)
         }
-        if (result == null && error == null) RevealElement(6, target) { ProgressBlock(progress, colors) }
+        val missing = result?.optJSONArray("_missing_modules")
+        if ((result == null || (missing?.length() ?: 0) > 0) && error == null) RevealElement(6, target) {
+            ProgressBlock(progress, colors, if (result == null) "正在解析" else
+                "补全 · ${(0 until (missing?.length() ?: 0)).joinToString(" / ") { missing?.optString(it).orEmpty() }}")
+        }
         if (error != null) {
             RevealElement(6, error) {
                 Text(error, color = colors.paragraph, fontSize = 14.sp, lineHeight = 20.sp)
@@ -1233,7 +1444,7 @@ private fun labelsFor(lexeme: Lexeme?): List<String> = buildList {
 }
 
 @Composable
-private fun ProgressBlock(progress: QueryProgress?, colors: Palette) {
+private fun ProgressBlock(progress: QueryProgress?, colors: Palette, label: String = "正在解析") {
     val phase = progress?.phase ?: QueryPhase.CONTEXT
     val phases = listOf("拼接上下文", "等待首字返回", "接收完整结果")
     val active = when (phase) {
@@ -1243,7 +1454,7 @@ private fun ProgressBlock(progress: QueryProgress?, colors: Palette) {
     val transition = rememberInfiniteTransition(label = "query pulse")
     val pulse by transition.animateFloat(0.4f, 1f, infiniteRepeatable(tween(950), RepeatMode.Reverse), label = "pulse")
     Column(Modifier.fillMaxWidth().padding(top = 12.dp)) {
-        Text("正在解析", color = colors.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+        Text(label, color = colors.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(10.dp))
         Box(Modifier.fillMaxWidth().height(3.dp).background(colors.muted.copy(alpha = .22f))) {
             Box(Modifier.fillMaxWidth(fraction).height(3.dp).background(colors.word.copy(alpha = if (phase == QueryPhase.COMPLETE) 1f else pulse)))
@@ -1332,11 +1543,13 @@ private fun UpdateDownloadSheet(
 @Composable
 private fun SettingsSheet(
     colors: Palette, dark: Boolean, markQueriedWords: Boolean, silentInference: Boolean,
+    customStatusBar: Boolean, bookmarkVisible: Boolean,
     current: Provider, settings: SecureSettings,
     updateStatus: String, updateInfo: UpdateInfo?, updateChecking: Boolean,
     focusStatus: String, modifier: Modifier,
     onDark: (Boolean) -> Unit, onMarkQueriedWords: (Boolean) -> Unit,
-    onSilentInference: (Boolean) -> Unit, onCheckUpdate: () -> Unit,
+    onSilentInference: (Boolean) -> Unit, onCustomStatusBar: (Boolean) -> Unit,
+    onBookmarkVisible: (Boolean) -> Unit, onCheckUpdate: () -> Unit,
     onDownloadUpdate: () -> Unit, onSave: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -1396,6 +1609,22 @@ private fun SettingsSheet(
             Spacer(Modifier.weight(1f))
             Text(if (dark) "ON" else "OFF", color = colors.word, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
+        Spacer(Modifier.height(20.dp))
+        Row(Modifier.fillMaxWidth().clickable { onCustomStatusBar(!customStatusBar) }, verticalAlignment = Alignment.CenterVertically) {
+            Text("沉浸状态栏", color = colors.ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            Text(if (customStatusBar) "ON" else "OFF", color = colors.word, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        }
+        Text("隐藏系统状态栏，显示篇名、时间、进度和专注状态；保留挖孔安全区。顶部滑动可临时唤回系统栏。",
+            color = colors.muted, fontSize = 11.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 5.dp))
+        Spacer(Modifier.height(20.dp))
+        Row(Modifier.fillMaxWidth().clickable { onBookmarkVisible(!bookmarkVisible) }, verticalAlignment = Alignment.CenterVertically) {
+            Text("跟随书签", color = colors.ink, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            Text(if (bookmarkVisible) "ON" else "OFF", color = colors.word, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        }
+        Text("透明圆角包裹最远阅读段落；向下阅读、查询会推进，点顶部书签可返回。关闭只隐藏背景，不清除位置。",
+            color = colors.muted, fontSize = 11.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 5.dp))
         Spacer(Modifier.height(20.dp))
         Row(Modifier.fillMaxWidth().clickable { onMarkQueriedWords(!markQueriedWords) },
             verticalAlignment = Alignment.CenterVertically) {
