@@ -4,6 +4,10 @@ import java.util.Locale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.text.font.FontWeight
+
+internal fun resolveGlyphWeight(text: AnnotatedString, offset: Int): FontWeight =
+    text.spanStyles.lastOrNull { offset in it.start until it.end && it.item.fontWeight != null }?.item?.fontWeight ?: FontWeight.Normal
 
 internal fun resolveGlyphColor(text: AnnotatedString, offset: Int, fallback: Color): Color =
     text.spanStyles.lastOrNull { offset in it.start until it.end &&

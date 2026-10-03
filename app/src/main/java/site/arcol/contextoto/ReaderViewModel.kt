@@ -7,7 +7,10 @@ class ContextoApplication : Application() {
     val content by lazy { Content(this) }
     val store by lazy { UserStore(this) }
     val settings by lazy { SecureSettings(this) }
-    val engine by lazy { AnalysisEngine(content, store) }
+    val engine by lazy {
+        settings.rememberCacheProvider(settings.provider())
+        AnalysisEngine(content, store, legacyProviders = settings::cacheProviders)
+    }
 }
 
 class ReaderViewModel(application: Application) : AndroidViewModel(application) {

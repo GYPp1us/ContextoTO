@@ -112,13 +112,60 @@ class CacheIntegrationTest {
         context.deleteDatabase(name)
     }
 
+    @Test fun switchingServiceModelAndProtocolReusesLegacyWordModules(): Unit = runBlocking {
+        val name = "rc3-provider-cache-test.db"
+        context.deleteDatabase(name)
+        UserStore(context, name).use { store ->
+            val content = Content(context)
+            val article = content.articles.first()
+            val paragraph = article.paragraphs.first()
+            val token = Content.tokens(paragraph).first()
+            val lemma = content.lemma(token.text)
+            store.putAnalysis(key("word-common", lemma), "word-common",
+                """{"common_senses":[{"zh":"这","part_of_speech":"det."}],"derivatives":[]}""")
+            store.putAnalysis(key("word-context", "$lemma|$paragraph|${token.start}"), "word-context",
+                """{"context_sense":{"zh":"此处这个","part_of_speech":"det."}}""")
+            store.putAnalysis(key("word-pronunciation", token.text.lowercase(java.util.Locale.US)), "word-pronunciation",
+                """{"phonetics":{"uk":"/ðə/","us":"/ðə/"}}""")
+            val engine = AnalysisEngine(content, store, AnalysisTransport { _, _, _, _, _ ->
+                error("A cached word must not trigger another provider")
+            }, legacyProviders = { listOf(provider) })
+            val different = Provider("自定义", "https://another.example/v1", "another-model", "fixture-key", protocol = ApiProtocol.RESPONSES)
+            val result = engine.word(different, article, 0, token) {}
+            assertEquals("此处这个", result.getJSONObject("context_sense").getString("zh"))
+            assertTrue(engine.wordComplete(different, paragraph, token))
+            assertNotNull(store.getAnalysis(key("word-common", lemma)))
+            val reopened = AnalysisEngine(content, store, AnalysisTransport { _, _, _, _, _ -> error("Should use shared cache") })
+            assertTrue(reopened.wordComplete(different.copy(model = "third-model"), paragraph, token))
+        }
+        context.deleteDatabase(name)
+    }
+
+    @Test fun rc2BookmarkMigratesToSentenceAndPreservesOtherData() {
+        val name = "rc3-bookmark-migration-test.db"
+        context.deleteDatabase(name)
+        val legacy = SQLiteDatabase.openOrCreateDatabase(context.getDatabasePath(name), null)
+        legacy.execSQL("CREATE TABLE analysis(cache_key TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL)")
+        legacy.execSQL("CREATE TABLE bookmark(article_id TEXT PRIMARY KEY, paragraph_index INTEGER NOT NULL, updated_at INTEGER NOT NULL)")
+        legacy.execSQL("INSERT INTO bookmark VALUES('n01',3,123)")
+        legacy.execSQL("INSERT INTO analysis VALUES('kept','word-common','{}',1)")
+        legacy.version = 2; legacy.close()
+        UserStore(context, name).use { store ->
+            assertEquals(BookmarkPlace(3, 0), store.bookmarkPlace("n01"))
+            assertEquals(BookmarkPlace(3, 90), store.advanceSentenceBookmark("n01", BookmarkPlace(3, 90)))
+            assertEquals(BookmarkPlace(3, 90), store.advanceSentenceBookmark("n01", BookmarkPlace(3, 20)))
+            assertNotNull(store.getAnalysis("kept"))
+        }
+        context.deleteDatabase(name)
+    }
+
     /** Explicit opt-in emulator-only visual fixtures; never part of the release APK. */
     @Test fun seedVisualFixturesOnlyWhenRequested() {
         if (InstrumentationRegistry.getArguments().getString("seedVisualFixtures") != "true") return
         val content = Content(context)
         val article = content.articles.first()
         UserStore(context).use { store ->
-            for (paragraph in listOf(article.title, article.paragraphs.first())) {
+            for (paragraph in listOf(article.title, article.paragraphs.first(), content.articles[1].title, content.articles[1].paragraphs.first())) {
                 Content.tokens(paragraph).forEach { token ->
                     val lemma = content.lemma(token.text)
                     store.putAnalysis(key("word-common", lemma), "word-common",
@@ -140,6 +187,12 @@ class CacheIntegrationTest {
                 }
             }
         }
+        val settings = SecureSettings(context)
+        settings.saveModelCatalog("https://api.deepseek.com", settings.savedKey("DeepSeek 官方"),
+            listOf(ModelOption("deepseek-flash", "DeepSeek-V4.1-Flash"), ModelOption("deepseek-v4-pro", "DeepSeek-V4-Pro")))
+        assertEquals(2, settings.cachedModels("https://api.deepseek.com", settings.savedKey("DeepSeek 官方")).size)
+        // Instrumentation may exit immediately: drain the asynchronous preference write before it does.
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().commit()
     }
 
     @Test fun removeVisualFixturesOnlyWhenRequested() {
@@ -148,5 +201,8 @@ class CacheIntegrationTest {
             store.writableDatabase.delete("analysis", "payload LIKE ? OR payload LIKE ?",
                 arrayOf("%模拟器%", "%/test/%"))
         }
+        val settings = SecureSettings(context)
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().remove("model_catalog_" +
+            Content.sha256("https://api.deepseek.com|${settings.savedKey("DeepSeek 官方")}")).commit()
     }
 }

@@ -3,11 +3,22 @@ package site.arcol.contextoto
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class GlyphStyleTest {
+    @Test fun queriedBoldPreservesClauseColorAndSmallCapsSize() {
+        val text = buildAnnotatedString {
+            append("LAW")
+            addStyle(SpanStyle(color = Color.Green, fontSize = 32.76.sp), 0, 3)
+            addStyle(SpanStyle(fontWeight = FontWeight.Bold), 0, 3)
+        }
+        assertEquals(FontWeight.Bold, resolveGlyphWeight(text, 1))
+        assertEquals(Color.Green, resolveGlyphColor(text, 1, Color.White))
+        assertEquals(32.76f, resolveGlyphSize(text, 1, 42f), .001f)
+    }
     @Test fun aSizeOnlySmallCapsSpanDoesNotBecomeBlack() {
         val text = buildAnnotatedString {
             append("LAW")

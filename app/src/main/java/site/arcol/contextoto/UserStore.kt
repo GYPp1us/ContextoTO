@@ -15,12 +15,17 @@ import javax.crypto.spec.GCMParameterSpec
 import org.json.JSONObject
 
 data class ReadingPlace(val articleId: String, val item: Int, val offset: Int)
-data class Provider(val name: String, val baseUrl: String, val model: String, val key: String) {
+data class Provider(val name: String, val baseUrl: String, val model: String, val key: String,
+                    val supportedEfforts: List<String> = emptyList(), val defaultEffort: String = "",
+                    val protocol: ApiProtocol = ApiProtocol.CHAT) {
     val official: Boolean get() = name == "DeepSeek 官方"
 }
 data class AnalysisRecord(val key: String, val kind: String, val payload: JSONObject)
+data class BookmarkPlace(val paragraph: Int = 0, val sentenceStart: Int = 0) : Comparable<BookmarkPlace> {
+    override fun compareTo(other: BookmarkPlace): Int = compareValuesBy(this, other, { it.paragraph }, { it.sentenceStart })
+}
 
-class UserStore(context: Context, databaseName: String = "contextoto.db") : SQLiteOpenHelper(context, databaseName, null, 2) {
+class UserStore(context: Context, databaseName: String = "contextoto.db") : SQLiteOpenHelper(context, databaseName, null, 3) {
     override fun onConfigure(db: SQLiteDatabase) {
         db.enableWriteAheadLogging()
         db.setForeignKeyConstraintsEnabled(true)
@@ -32,10 +37,11 @@ class UserStore(context: Context, databaseName: String = "contextoto.db") : SQLi
         createBookmarks(db)
     }
     private fun createBookmarks(db: SQLiteDatabase) {
-        db.execSQL("CREATE TABLE IF NOT EXISTS bookmark(article_id TEXT PRIMARY KEY, paragraph_index INTEGER NOT NULL, updated_at INTEGER NOT NULL)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS bookmark(article_id TEXT PRIMARY KEY, paragraph_index INTEGER NOT NULL, sentence_start INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL)")
     }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createBookmarks(db)
+        if (oldVersion == 2) db.execSQL("ALTER TABLE bookmark ADD COLUMN sentence_start INTEGER NOT NULL DEFAULT 0")
     }
 
     fun getAnalysis(key: String): String? = readableDatabase.rawQuery("SELECT payload FROM analysis WHERE cache_key=?", arrayOf(key)).use {
@@ -87,17 +93,21 @@ class UserStore(context: Context, databaseName: String = "contextoto.db") : SQLi
         }
         writableDatabase.insertWithOnConflict("reading_place", null, values, SQLiteDatabase.CONFLICT_REPLACE)
     }
-    fun bookmark(articleId: String): Int = readableDatabase.rawQuery(
-        "SELECT paragraph_index FROM bookmark WHERE article_id=?", arrayOf(articleId)
-    ).use { if (it.moveToFirst()) it.getInt(0) else 0 }
-    fun advanceBookmark(articleId: String, paragraphIndex: Int): Int {
-        if (paragraphIndex < 0) return bookmark(articleId)
+    fun bookmarkPlace(articleId: String): BookmarkPlace = readableDatabase.rawQuery(
+        "SELECT paragraph_index,sentence_start FROM bookmark WHERE article_id=?", arrayOf(articleId)
+    ).use { if (it.moveToFirst()) BookmarkPlace(it.getInt(0), it.getInt(1)) else BookmarkPlace() }
+    fun bookmark(articleId: String): Int = bookmarkPlace(articleId).paragraph
+    fun advanceBookmark(articleId: String, paragraphIndex: Int): Int =
+        advanceSentenceBookmark(articleId, BookmarkPlace(paragraphIndex)).paragraph
+    fun advanceSentenceBookmark(articleId: String, place: BookmarkPlace): BookmarkPlace {
+        if (place.paragraph < 0 || place.sentenceStart < 0) return bookmarkPlace(articleId)
         val db = writableDatabase
         db.beginTransaction()
         try {
-            val furthest = maxOf(bookmark(articleId), paragraphIndex)
+            val furthest = maxOf(bookmarkPlace(articleId), place)
             val values = ContentValues().apply {
-                put("article_id", articleId); put("paragraph_index", furthest); put("updated_at", System.currentTimeMillis())
+                put("article_id", articleId); put("paragraph_index", furthest.paragraph)
+                put("sentence_start", furthest.sentenceStart); put("updated_at", System.currentTimeMillis())
             }
             db.insertWithOnConflict("bookmark", null, values, SQLiteDatabase.CONFLICT_REPLACE)
             db.setTransactionSuccessful()
@@ -178,13 +188,55 @@ class SecureSettings(private val context: Context) {
     fun saveKey(provider: String, key: String) {
         prefs.edit().putString("key_${provider}", encrypt(key.trim())).apply()
     }
+    fun savedKey(name: String): String = prefs.getString("key_$name", null)?.let(::decrypt).orEmpty()
+    fun modelForProvider(name: String): String = prefs.getString("selected_model_$name", null)
+        ?.takeIf { it.isNotBlank() } ?: when (name) {
+            "Command Code GOAT" -> "deepseek/deepseek-v4.1-flash"
+            "自定义" -> customModel
+            else -> "deepseek-flash"
+        }
+    fun saveModel(name: String, id: String) {
+        prefs.edit().putString("selected_model_$name", id.trim()).apply()
+        if (name == "自定义") customModel = id.trim()
+    }
+    fun protocolForProvider(name: String): ApiProtocol = runCatching {
+        ApiProtocol.valueOf(prefs.getString("protocol_$name", "CHAT") ?: "CHAT")
+    }.getOrDefault(ApiProtocol.CHAT)
+    fun saveProtocol(name: String, protocol: ApiProtocol) {
+        prefs.edit().putString("protocol_$name", protocol.name).apply()
+    }
+    fun rememberCacheProvider(provider: Provider) {
+        val sources = cacheProviders().filter { it.baseUrl.isNotBlank() && it.model.isNotBlank() }
+            .plus(provider).distinctBy { it.baseUrl to it.model }
+        prefs.edit().putString("cache_sources", org.json.JSONArray(sources.map {
+            JSONObject().put("base_url", it.baseUrl).put("model", it.model)
+        }).toString()).apply()
+    }
+    fun cacheProviders(): List<Provider> {
+        val items = runCatching { org.json.JSONArray(prefs.getString("cache_sources", "[]")) }.getOrDefault(org.json.JSONArray())
+        val remembered = (0 until items.length()).mapNotNull { index ->
+            items.optJSONObject(index)?.let { Provider("", it.optString("base_url"), it.optString("model"), "") }
+        }
+        return remembered + listOf("DeepSeek 官方", "Command Code GOAT", "自定义").map { name ->
+            Provider(name, providerBaseUrl(name, customBaseUrl), modelForProvider(name), "")
+        } + listOf(Provider("", "https://api.deepseek.com", "deepseek-flash", ""),
+            Provider("", "https://api.commandcode.ai/provider/v1", "deepseek/deepseek-v4.1-flash", ""))
+    }
+    fun cachedModels(baseUrl: String, key: String): List<ModelOption> = runCatching {
+        parseModelCatalog(JSONObject(prefs.getString(modelCatalogKey(baseUrl, key), null) ?: return emptyList()))
+    }.getOrDefault(emptyList())
+    fun saveModelCatalog(baseUrl: String, key: String, models: List<ModelOption>) {
+        prefs.edit().putString(modelCatalogKey(baseUrl, key), modelCatalogJson(models).toString()).apply()
+    }
+    private fun modelCatalogKey(baseUrl: String, key: String): String =
+        "model_catalog_" + Content.sha256("${baseUrl.trim().trimEnd('/')}|$key")
     fun provider(): Provider {
         val name = providerName
-        val key = prefs.getString("key_${name}", null)?.let(::decrypt).orEmpty()
-        return when (name) {
-            "Command Code GOAT" -> Provider(name, "https://api.commandcode.ai/provider/v1", "deepseek/deepseek-v4.1-flash", key)
-            "自定义" -> Provider(name, customBaseUrl.trimEnd('/'), customModel, key)
-            else -> Provider("DeepSeek 官方", "https://api.deepseek.com", "deepseek-flash", key)
-        }
+        val key = savedKey(name)
+        val baseUrl = providerBaseUrl(name, customBaseUrl)
+        val model = modelForProvider(name)
+        val option = cachedModels(baseUrl, key).firstOrNull { it.id == model }
+        return Provider(name, baseUrl, model, key, option?.supportedEfforts.orEmpty(), option?.defaultEffort.orEmpty(),
+            protocolForProvider(name))
     }
 }
