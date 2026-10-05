@@ -234,6 +234,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     var drawerOpen by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
     var settingsRetained by remember { mutableStateOf(false) }
+    var directoryRetiring by remember { mutableStateOf(false) }
     var cutoutFactor by remember { mutableStateOf(settings.cutoutFactor) }
     var learningSettingsRevision by remember { mutableIntStateOf(0) }
     LaunchedEffect(wordPage, drawerOpen, wordMenu, settingsOpen) {
@@ -242,6 +243,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     LaunchedEffect(settingsOpen, deck.position.value) {
         if (settingsOpen || deck.position.value < -.6001f) settingsRetained = true
         else if (deck.position.value >= -.001f) settingsRetained = false
+        if (deck.position.value <= -.999f) directoryRetiring = false
     }
     LaunchedEffect(settingsOpen) { if (settingsOpen) { wordPage = false; wordMenu = false; drawerOpen = false } }
     fun selectDeck(target: Float) {
@@ -536,7 +538,8 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     val modalOverlay = hasOverlay && !drawerOpen && !wordMenu && !settingsOpen ||
         silentOpen || sentenceOpen != null || wordTarget != null || studyBusy || importKind != null || focusOpen || guideStep < 4 || regenerate != null || updateOpen
     val popupBlur by animateFloatAsState(if (modalOverlay) GLASS_BLUR else 0f, tween(290, easing = FastOutSlowInEasing), label = "body blur")
-    val directoryProgress = directoryFraction(deck.position.value)
+    val directoryProgress = if ((settingsOpen && !directoryRetiring) || (settingsRetained && !settingsOpen)) 0f
+        else directoryFraction(deck.position.value)
     val menuProgress = wordMenuFraction(deck.position.value)
     val blur = maxOf(popupBlur, GLASS_BLUR * maxOf(directoryProgress, menuProgress))
     val updateBlur by animateFloatAsState(if (updateOpen) GLASS_BLUR else 0f,
@@ -560,9 +563,11 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     BoxWithConstraints(Modifier.fillMaxSize().background(colors.paper).clipToBounds().pointerInput(modalOverlay) {
         val tracker = VelocityTracker()
         var dragBounds: ClosedFloatingPointRange<Float> = -.6f..1f
+        var returningFromSettings = false
         detectHorizontalDragGestures(onDragStart = { start ->
+            returningFromSettings = settingsOpen || deck.position.value < -.61f
             dragBounds = when {
-                settingsOpen || deck.position.value < -.61f -> -1f..0f
+                returningFromSettings -> -1f..0f
                 drawerOpen || deck.position.value < -.1f -> -.6f..0f
                 wordMenu || deck.position.value > 1.1f -> 1f..1.6f
                 wordPage || deck.position.value > .5f -> 0f..1.6f
@@ -575,9 +580,9 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                 change.consume(); tracker.addPosition(change.uptimeMillis, change.position)
                 deckScope.launch(start = CoroutineStart.UNDISPATCHED) { deck.drag(-delta / size.width, dragBounds) }
             }
-        }, onDragCancel = { if (!modalOverlay) selectDeck(deckTarget(deck.position.value, 0f, dragBounds)) },
+        }, onDragCancel = { if (!modalOverlay) selectDeck(deckTarget(deck.position.value, 0f, dragBounds, returningFromSettings)) },
             onDragEnd = {
-                if (!modalOverlay && !deck.swapping) selectDeck(deckTarget(deck.position.value, -tracker.calculateVelocity().x / size.width, dragBounds))
+                if (!modalOverlay && !deck.swapping) selectDeck(deckTarget(deck.position.value, -tracker.calculateVelocity().x / size.width, dragBounds, returningFromSettings))
             })
     }) {
         val width = maxWidth
@@ -755,7 +760,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                         articleIndex = index; wordTarget = null; sentenceOpen = null
                         store.savePlace(content.articles[index].id, 0, 0)
                     }) { drawerOpen = false }
-                }, onSettings = { drawerOpen = false; settingsOpen = true },
+                }, onSettings = { directoryRetiring = true; drawerOpen = false; settingsOpen = true },
                 onImport = { drawerOpen = false; importKind = false }, onGuide = { drawerOpen = false; guideStep = 0; settings.guideStep = 0 })
         }
 

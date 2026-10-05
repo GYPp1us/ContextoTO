@@ -118,8 +118,9 @@ internal fun JumpLink(label: String, colors: Palette, modifier: Modifier = Modif
 }
 
 /** Physical page coordinate: settings=-1, directory=-.6, reading=0, words=1, menu=1.6. */
-internal fun deckTarget(position: Float, velocity: Float, bounds: ClosedFloatingPointRange<Float> = -1f..1.6f): Float {
-    val anchors = listOf(-1f, -.6f, 0f, 1f, 1.6f)
+internal fun deckTarget(position: Float, velocity: Float, bounds: ClosedFloatingPointRange<Float> = -1f..1.6f,
+                        settingsOnly: Boolean = false): Float {
+    val anchors = if (settingsOnly) listOf(-1f, 0f) else listOf(-1f, -.6f, 0f, 1f, 1.6f)
     val projected = (position + velocity * .12f).coerceIn(bounds.start, bounds.endInclusive)
     return anchors.filter { it in bounds }.minBy { abs(it - projected) }
 }

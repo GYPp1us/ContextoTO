@@ -13,6 +13,8 @@ class InteractionTest {
         assertEquals(-.6f, deckTarget(-.3f, -30f, -.6f..1f), .001f)
         assertEquals(0f, deckTarget(-.3f, 30f, -.6f..0f), .001f)
         assertEquals(1f, deckTarget(1.3f, -30f, 1f..1.6f), .001f)
+        assertEquals(0f, deckTarget(-.6f, 3f, -1f..0f, settingsOnly = true), .001f)
+        assertEquals(-1f, deckTarget(-.6f, 0f, -1f..0f, settingsOnly = true), .001f)
     }
     @Test fun directoryCollapsesAsSettingsTakesItsPlace() {
         assertEquals(0f, directoryFraction(0f), .001f)
