@@ -11,7 +11,7 @@ import java.util.UUID
 
 class LearningStore(private val store: UserStore, private val content: Content) {
     private var poolBanks: List<WordBank>? = null
-    private var dictionaryPool: List<Pair<String, Meaning>> = emptyList()
+    private var dictionaryPool = DistractorIndex(emptyList())
     val revision get() = store.learningRevision
     private val db get() = store.writableDatabase
     private fun changed() { store.bumpLearningRevision() }
@@ -77,7 +77,9 @@ class LearningStore(private val store: UserStore, private val content: Content) 
     fun studyWords(): List<StudyWord> = db.rawQuery("SELECT word,archived,memory FROM study_word ORDER BY word COLLATE NOCASE", null).use { cursor ->
         buildList { while (cursor.moveToNext()) add(StudyWord(cursor.getString(0), cursor.getInt(1) != 0, Memory.parse(JSONObject(cursor.getString(2))))) }
     }
-    fun studyWord(word: String) = studyWords().firstOrNull { it.word == word }
+    fun studyWord(word: String): StudyWord? = db.rawQuery("SELECT archived,memory FROM study_word WHERE word=?", arrayOf(word)).use {
+        if (it.moveToFirst()) StudyWord(word, it.getInt(0) != 0, Memory.parse(JSONObject(it.getString(1)))) else null
+    }
     fun legacyArticles(word: String): List<String> = db.rawQuery(
         "SELECT article_id FROM lookup_event WHERE kind='word' AND item_id=? AND article_id NOT IN (SELECT article_id FROM occurrence WHERE word=?)", arrayOf(word, word)
     ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.getString(0)) } }
@@ -156,34 +158,58 @@ class LearningStore(private val store: UserStore, private val content: Content) 
     fun currentQuestion(): ReviewQuestion? = db.rawQuery("SELECT payload FROM review_question WHERE closed=0 ORDER BY created_at DESC LIMIT 1", null).use {
         if (it.moveToFirst()) ReviewQuestion.parse(JSONObject(it.getString(0))) else null
     }
-    fun nextQuestion(early: Boolean = false, now: Long = System.currentTimeMillis()): ReviewQuestion? {
+    fun nextQuestion(early: Boolean = false, now: Long = System.currentTimeMillis(), excluded: Set<String> = emptySet(),
+                     dailyLimit: Int = 0, onProgress: (QuestionPreparation) -> Unit = {}): ReviewQuestion? {
         currentQuestion()?.let { return it }
-        val active = studyWords().filter { !it.archived }
+        return prepareQuestion(early, now, excluded, dailyLimit, onProgress)?.let(::activateQuestion)
+    }
+    fun dailyReviewedCount(now: Long = System.currentTimeMillis()): Int = db.rawQuery(
+        "SELECT COUNT(DISTINCT word) FROM review_attempt WHERE day=? AND valid=1", arrayOf(day(now))
+    ).use { if (it.moveToFirst()) it.getInt(0) else 0 }
+    /** Read-only preparation can run while the preceding answer is on screen. */
+    @Synchronized
+    fun prepareQuestion(early: Boolean = false, now: Long = System.currentTimeMillis(), excluded: Set<String> = emptySet(),
+                        dailyLimit: Int = 0, onProgress: (QuestionPreparation) -> Unit = {}): ReviewQuestion? {
+        onProgress(QuestionPreparation("读取复习队列", .08f))
+        val active = studyWords().filter { !it.archived && it.word !in excluded }
         val frequency = db.rawQuery("SELECT word,COUNT(*) FROM occurrence GROUP BY word", null).use { cursor -> buildMap {
             while (cursor.moveToNext()) put(cursor.getString(0), cursor.getInt(1))
         } }
-        val todayNew = db.rawQuery("SELECT COUNT(DISTINCT word) FROM review_attempt WHERE day=? AND was_new=1", arrayOf(day(now))).use {
-            if (it.moveToFirst()) it.getInt(0) else 0
-        }
-        val due = active.filter { (early || it.memory.due <= now) && (it.memory.reviews > 0 || todayNew < 10) }.shuffled()
-            .sortedWith(compareBy<StudyWord> { it.memory.reviews == 0 }.thenByDescending {
+        val todayCount = dailyReviewedCount(now)
+        if (dailyLimit > 0 && todayCount >= dailyLimit) return null
+        val due = active.filter { it.memory.reviews == 0 || early || it.memory.due <= now }.shuffled()
+            .sortedWith(compareBy<StudyWord> { it.memory.reviews != 0 }.thenByDescending {
                 val overdue = ((now - it.memory.due).toDouble() / MemoryCurve.DAY).coerceAtLeast(0.0)
                 overdue * 2 + it.memory.difficulty * .2 + kotlin.math.ln(1.0 + (frequency[it.word] ?: 0)) +
                     1.0 / (1 + (content.lexicon[it.word]?.rank ?: 10000) / 500.0)
             })
         if (poolBanks !== content.banks) {
-            dictionaryPool = content.banks.flatMap { bank -> bank.words.values.flatMap { entry ->
+            onProgress(QuestionPreparation("索引词库释义与词性", .25f))
+            dictionaryPool = DistractorIndex(content.banks.flatMap { bank -> bank.words.values.flatMap { entry ->
                 dictionaryMeanings(entry.translation, bank.name, bank.id).map { entry.word to it }
-            } }
+            } })
             poolBanks = content.banks
         }
         val pool = dictionaryPool
-        for (candidate in due) {
+        for ((index, candidate) in due.withIndex()) {
+            onProgress(QuestionPreparation("筛选可出题词条 · ${index + 1} / ${due.size}", .5f + .35f * index / due.size.coerceAtLeast(1)))
             val question = makeQuestion(candidate.word, meanings(candidate.word), pool, now) ?: continue
-            insert("review_question", ContentValues().apply { put("id", question.id); put("word", question.word); put("payload", question.json().toString())
-                put("created_at", now); put("closed", 0) }); return question
+            onProgress(QuestionPreparation("选项组装完成", 1f)); return question
         }
         return null
+    }
+    fun activateQuestion(question: ReviewQuestion): ReviewQuestion? = transaction {
+        currentQuestion()?.let { return@transaction it }
+        if (studyWord(question.word)?.archived != false) return@transaction null
+        // Prepared snapshots may outlive a cache/import update. Never activate a
+        // vanished answer or an option that has meanwhile become a true sense.
+        val currentMeanings = meanings(question.word).map { meaningIdentity(it.text) }.toSet()
+        if (meaningIdentity(question.answer.text) !in currentMeanings || question.options.withIndex().any {
+            it.index != question.correct && meaningIdentity(it.value) in currentMeanings
+        }) return@transaction null
+        insert("review_question", ContentValues().apply { put("id", question.id); put("word", question.word); put("payload", question.json().toString())
+            put("created_at", question.created); put("closed", 0) })
+        question
     }
     fun closeQuestion(id: String) { db.update("review_question", ContentValues().apply { put("closed", 1) }, "id=?", arrayOf(id)); changed() }
     fun answer(question: ReviewQuestion, action: String, selected: Int? = null, now: Long = System.currentTimeMillis()): ReviewQuestion {
@@ -204,6 +230,41 @@ class LearningStore(private val store: UserStore, private val content: Content) 
     fun selfGrade(word: String, remembered: Boolean, now: Long = System.currentTimeMillis()) {
         transaction { grade(UUID.randomUUID().toString(), word, remembered, "self", JSONObject(), now) }; changed()
     }
+    /** Change the original attempt, preserving its timestamp/id/heat; never add a second score. */
+    fun reviseAnswer(question: ReviewQuestion, action: String, now: Long = System.currentTimeMillis()): ReviewQuestion {
+        require(action in setOf("remember", "forget", "archive"))
+        val revised = transaction {
+            val previous = db.rawQuery("SELECT payload FROM review_question WHERE id=?", arrayOf(question.id)).use {
+                require(it.moveToFirst()); ReviewQuestion.parse(JSONObject(it.getString(0)))
+            }
+            val result = previous.copy(action = action, selected = null)
+            if (action == "archive") {
+                archive(question.word, true)
+                db.update("review_attempt", ContentValues().apply { put("valid", 0) }, "id=?", arrayOf(question.id))
+            } else {
+                archive(question.word, false)
+                // Issue-retracted questions must not silently regain a score.
+                val retracted = db.rawQuery("SELECT COUNT(*) FROM question_issue WHERE question_id=?", arrayOf(question.id)).use { it.moveToFirst(); it.getInt(0) > 0 }
+                if (!retracted) {
+                    val exists = db.rawQuery("SELECT COUNT(*) FROM review_attempt WHERE id=?", arrayOf(question.id)).use { it.moveToFirst(); it.getInt(0) > 0 }
+                    if (!exists) grade(question.id, question.word, action == "remember", "question", result.json(), now)
+                    else db.update("review_attempt", ContentValues().apply { put("remembered", if (action == "remember") 1 else 0)
+                        put("valid", 1); put("snapshot", result.json().toString()) }, "id=?", arrayOf(question.id))
+                }
+            }
+            replay(question.word)
+            db.update("review_question", ContentValues().apply { put("payload", result.json().toString()) }, "id=?", arrayOf(question.id))
+            result
+        }
+        changed(); return revised
+    }
+    private fun replay(word: String) {
+        var memory = Memory()
+        db.rawQuery("SELECT remembered,created_at,day FROM review_attempt WHERE word=? AND valid=1 ORDER BY created_at,rowid", arrayOf(word)).use { cursor ->
+            while (cursor.moveToNext()) memory = MemoryCurve.grade(memory, cursor.getInt(0) == 1, cursor.getLong(1), cursor.getString(2))
+        }
+        db.update("study_word", ContentValues().apply { put("memory", memory.json().toString()) }, "word=?", arrayOf(word))
+    }
     private fun grade(id: String, word: String, remembered: Boolean, source: String, snapshot: JSONObject, now: Long) {
         addWord(word, now)
         val old = studyWord(word)!!.memory
@@ -222,11 +283,7 @@ class LearningStore(private val store: UserStore, private val content: Content) 
             insert("question_issue", ContentValues().apply { put("question_id", question.id); put("type", type); put("snapshot", question.json().toString())
                 put("created_at", now); put("score_retracted", if (question.action != "archive") 1 else 0) })
             db.update("review_attempt", ContentValues().apply { put("valid", 0) }, "id=? AND valid=1", arrayOf(question.id))
-            var memory = Memory()
-            db.rawQuery("SELECT remembered,created_at,day FROM review_attempt WHERE word=? AND valid=1 ORDER BY created_at,rowid", arrayOf(question.word)).use { cursor ->
-                while (cursor.moveToNext()) memory = MemoryCurve.grade(memory, cursor.getInt(0) == 1, cursor.getLong(1), cursor.getString(2))
-            }
-            db.update("study_word", ContentValues().apply { put("memory", memory.json().toString()) }, "word=?", arrayOf(question.word))
+            replay(question.word)
         }
         changed()
     }

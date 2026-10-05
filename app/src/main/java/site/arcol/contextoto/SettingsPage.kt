@@ -1,39 +1,28 @@
 package site.arcol.contextoto
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -51,7 +40,7 @@ internal fun SettingsSheet(
     onDark: (Boolean) -> Unit, onMarkQueriedWords: (Boolean) -> Unit,
     onSilentInference: (Boolean) -> Unit, onCustomStatusBar: (Boolean) -> Unit,
     onBookmarkVisible: (Boolean) -> Unit, onCheckUpdate: () -> Unit,
-    onDownloadUpdate: () -> Unit, onSave: () -> Unit
+    onDownloadUpdate: () -> Unit, onSave: () -> Unit, onBack: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -66,6 +55,12 @@ internal fun SettingsSheet(
     var lineFactor by remember { mutableStateOf(settings.lineFactor) }
     var sideMargin by remember { mutableStateOf(settings.sideMargin) }
     var paragraphGap by remember { mutableStateOf(settings.paragraphGap) }
+    var cutoutFactor by remember { mutableStateOf(settings.cutoutFactor) }
+    var importCountInput by remember { mutableStateOf(settings.randomImportCount.toString()) }
+    var reviewLimitInput by remember { mutableStateOf(settings.dailyReviewLimit.toString()) }
+    var reviewExpanded by remember { mutableStateOf(false) }
+    val settingsLayer = rememberGraphicsLayer()
+    var footerY by remember { mutableFloatStateOf(0f) }
     var modelExpanded by remember { mutableStateOf(false) }
     var focusExpanded by remember { mutableStateOf(false) }
     var scaleExpanded by remember { mutableStateOf(false) }
@@ -108,13 +103,15 @@ internal fun SettingsSheet(
         if (focusExpanded && focusUrlInput.isNotBlank() && focusCatalog == null) loadFocusCatalog()
     }
     Box(modifier.imePadding()) {
-        Column(Modifier.fillMaxSize().padding(bottom = footerHeight).clipToBounds().verticalScroll(rememberScrollState())
+        RetainedColumn(Modifier.fillMaxSize().clipToBounds().drawWithContent {
+            settingsLayer.record { this@drawWithContent.drawContent() }; drawLayer(settingsLayer)
+        }
             .padding(horizontal = 26.dp).padding(top = 24.dp, bottom = 24.dp)) {
-            Text("SETTINGS / ${BuildConfig.VERSION_NAME}", color = colors.word, fontSize = 11.sp,
-                fontWeight = FontWeight.Bold, letterSpacing = 1.6.sp)
+            JumpLink("返回阅读", colors, onClick = onBack)
+            Text(BuildConfig.VERSION_NAME, color = colors.muted, fontSize = 11.sp)
             Spacer(Modifier.height(12.dp))
-            Text("阅读与连接", color = colors.ink, fontFamily = FontFamily.Serif, fontSize = 30.sp)
-            SettingsCategory("Reading", "阅读外观", colors)
+            UiHeading("SETTINGS", colors, size = 30)
+            SettingsCategory("Reading", colors)
             SwitchSetting("深色主题", "低饱和度的明暗阅读界面", dark, colors, onDark)
             SwitchSetting("沉浸状态栏", "篇名、时间、进度和专注状态；保留挖孔安全区", customStatusBar, colors, onCustomStatusBar)
             SwitchSetting("跟随书签", "沿句子轮廓包裹，随阅读与最远查询位置推进", bookmarkVisible, colors, onBookmarkVisible)
@@ -133,13 +130,26 @@ internal fun SettingsSheet(
                             { sideMargin = (sideMargin + 2).coerceAtMost(44f) }, colors)
                         ScaleStepper("段落间距", "${paragraphGap.roundToInt()} dp", { paragraphGap = (paragraphGap - 4).coerceAtLeast(12f) },
                             { paragraphGap = (paragraphGap + 4).coerceAtMost(72f) }, colors)
+                        ScaleStepper("挖孔预留高度", "${(cutoutFactor * 100).roundToInt()}%", { cutoutFactor = (cutoutFactor - .05f).coerceAtLeast(.3f) },
+                            { cutoutFactor = (cutoutFactor + .05f).coerceAtMost(1.5f) }, colors)
                     }
                 }
             }
-            SettingsCategory("Learning", "学习与标记", colors)
+            SettingsCategory("Learning", colors)
             SwitchSetting("已查询单词加粗", "保留正文及从句的原有颜色；默认关闭", markQueriedWords, colors, onMarkQueriedWords)
             SwitchSetting("静默推理", "后台逐句分析，会消耗所选模型额度；默认关闭", silentInference, colors, onSilentInference)
-            SettingsCategory("Connections", "模型与专注", colors)
+            SettingsFoldout("复习与导入", "每次加入 $importCountInput 词 · 每日 ${if (reviewLimitInput == "0") "不限" else reviewLimitInput + " 词"}",
+                reviewExpanded, colors, { reviewExpanded = !reviewExpanded }) {
+                Column {
+                    FieldLabel("随机加入词数", colors)
+                    SettingInput("1–500", importCountInput, colors, onChange = { importCountInput = it.filter(Char::isDigit).take(3) })
+                    Spacer(Modifier.height(16.dp)); FieldLabel("每日复习词数", colors)
+                    SettingInput("0 为不限，最大 2000", reviewLimitInput, colors, onChange = { reviewLimitInput = it.filter(Char::isDigit).take(4) })
+                    Text("新词始终优先；每轮同一词不重复。每日按不同词计数，0 表示不限制。", color = colors.muted,
+                        fontSize = 11.sp, lineHeight = 18.sp)
+                }
+            }
+            SettingsCategory("Connections", colors)
             SettingsFoldout("模型与连接", "$selected · ${models[selected].orEmpty().ifBlank { "选择模型" }}",
                 modelExpanded, colors, { modelExpanded = !modelExpanded }) {
                 RevealElement(0, "model-services") {
@@ -215,25 +225,31 @@ internal fun SettingsSheet(
                     }
                 }
             }
-            SettingsCategory("About", "版本与更新", colors)
+            SettingsCategory("About", colors)
             SettingAction(if (updateChecking) "正在检查…" else "检查更新", colors, !updateChecking, onCheckUpdate)
             Text(updateStatus, Modifier.fillMaxWidth().clickable(enabled = updateInfo?.available == true,
                 onClick = onDownloadUpdate).padding(vertical = 12.dp), color = if (updateInfo?.available == true) colors.word else colors.muted,
                 fontSize = 12.sp, lineHeight = 18.sp)
+            Spacer(Modifier.height(footerHeight + 24.dp))
         }
-        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().onSizeChanged {
+        FrostedBar(settingsLayer, colors, footerY, Modifier.align(Alignment.BottomCenter).fillMaxWidth().onGloballyPositioned {
+            footerY = it.positionInParent().y
+        }) {
+        Column(Modifier.fillMaxWidth().onSizeChanged {
             footerHeight = with(density) { it.height.toDp() }
-        }.background(Brush.verticalGradient(listOf(
-            Color.Transparent, colors.paper.copy(alpha = .45f), colors.paper.copy(alpha = .82f))))
-            .padding(horizontal = 26.dp, vertical = 18.dp)) {
+        }.padding(horizontal = 26.dp, vertical = 18.dp)) {
             saveError?.let { Text(it, color = colors.paragraph, fontSize = 11.sp, modifier = Modifier.padding(bottom = 8.dp)) }
-            Row(Modifier.fillMaxWidth().clickable {
+            UiHeading("SAVE CHANGES", colors, size = 12)
+            JumpLink("保存并返回", colors, Modifier.fillMaxWidth(), size = 18, bold = true) {
+                if (importCountInput.toIntOrNull() !in 1..500 || reviewLimitInput.toIntOrNull() !in 0..2000) {
+                    saveError = "加入数量须为 1–500，每日复习须为 0–2000"; reviewExpanded = true; return@JumpLink
+                }
                 val unchangedFocus = focusUrlInput == settings.focusUrl && focusSubjectId == settings.focusSubjectId && focusItemId == settings.focusItemId
                 if (focusUrlInput.isNotBlank() && !unchangedFocus && focusCatalog?.item(focusSubjectId, focusItemId) == null) {
-                    saveError = "请读取上报目录，选择匹配的科目与事项"; focusExpanded = true; return@clickable
+                    saveError = "请读取上报目录，选择匹配的科目与事项"; focusExpanded = true; return@JumpLink
                 }
                 if (models[selected].isNullOrBlank() || runCatching { modelListUrl(providerBaseUrl(selected, url)) }.isFailure) {
-                    saveError = "请填写有效 API 端点与模型 ID"; modelExpanded = true; return@clickable
+                    saveError = "请填写有效 API 端点与模型 ID"; modelExpanded = true; return@JumpLink
                 }
                 settings.rememberCacheProvider(settings.provider())
                 settings.providerName = selected
@@ -243,27 +259,21 @@ internal fun SettingsSheet(
                 keys.filterValues { it.isNotBlank() }.forEach { (name, key) -> settings.saveKey(name, key) }
                 settings.rememberCacheProvider(settings.provider())
                 settings.bodySize = bodySize; settings.lineFactor = lineFactor; settings.sideMargin = sideMargin; settings.paragraphGap = paragraphGap
+                settings.cutoutFactor = cutoutFactor; settings.randomImportCount = importCountInput.toInt(); settings.dailyReviewLimit = reviewLimitInput.toInt()
                 settings.focusUrl = focusUrlInput
                 settings.focusSubjectId = if (focusUrlInput.isBlank()) 0 else focusSubjectId
                 settings.focusItemId = if (focusUrlInput.isBlank()) 0 else focusItemId
                 keys.clear(); onSave()
-            }.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column {
-                    Text("SAVE CHANGES", color = colors.word, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.6.sp)
-                    Spacer(Modifier.height(5.dp)); Text("保存并返回", color = colors.ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                }
-                Spacer(Modifier.weight(1f)); Text("→", color = colors.word, fontFamily = ReadingFont, fontSize = 28.sp)
             }
+        }
         }
     }
 }
 
 @Composable
-private fun SettingsCategory(english: String, chinese: String, colors: Palette) {
+private fun SettingsCategory(english: String, colors: Palette) {
     Row(Modifier.fillMaxWidth().padding(top = 32.dp, bottom = 16.dp), verticalAlignment = Alignment.Bottom) {
-        Text(english, color = colors.ink, fontFamily = ReadingFont, fontSize = 28.sp)
-        Spacer(Modifier.weight(1f)); Text(chinese, color = colors.muted, fontFamily = FontFamily.Serif, fontSize = 15.sp,
-            modifier = Modifier.padding(bottom = 3.dp))
+        UiHeading(english, colors, size = 28)
     }
 }
 
@@ -275,7 +285,7 @@ private fun SwitchSetting(label: String, detail: String, enabled: Boolean, color
         .toggleable(enabled, role = Role.Switch, onValueChange = change).padding(horizontal = 14.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f).padding(end = 16.dp)) {
-            Text(label, color = colors.ink, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+            UiHeading(label, colors, size = 15)
             Text(detail, color = colors.muted, fontSize = 11.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp))
         }
         Box(Modifier.size(44.dp, 24.dp).background(colors.word.copy(alpha = if (enabled) .3f else .12f))) {
@@ -291,15 +301,13 @@ private fun SettingsFoldout(title: String, summary: String, expanded: Boolean, c
         Row(Modifier.fillMaxWidth().background(colors.ink.copy(alpha = .035f)).clickable(onClick = toggle)
             .padding(horizontal = 14.dp, vertical = 15.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 16.dp)) {
-                Text(title, color = colors.ink, fontFamily = FontFamily.Serif, fontSize = 19.sp)
+                UiHeading(title, colors, size = 19)
                 Text(summary, color = colors.muted, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 5.dp))
             }
             Text(if (expanded) "−" else "+", color = colors.word, fontFamily = ReadingFont, fontSize = 27.sp)
         }
-        AnimatedVisibility(expanded,
-            enter = expandVertically(tween(400, easing = FastOutSlowInEasing), expandFrom = Alignment.Top) + fadeIn(tween(220)),
-            exit = shrinkVertically(tween(280, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top) + fadeOut(tween(220))) {
+        RetainedFoldout(expanded, title) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 16.dp), content = content)
         }
     }
@@ -307,14 +315,7 @@ private fun SettingsFoldout(title: String, summary: String, expanded: Boolean, c
 
 @Composable
 private fun SettingsReveal(expanded: Boolean, content: @Composable () -> Unit) {
-    val distance = with(LocalDensity.current) { 12.dp.roundToPx() }
-    AnimatedVisibility(expanded,
-        enter = expandVertically(tween(400, easing = FastOutSlowInEasing), expandFrom = Alignment.Top) +
-            fadeIn(tween(400)) + scaleIn(tween(400, easing = FastOutSlowInEasing), .7f, TransformOrigin(.5f, 0f)) +
-            slideInVertically(tween(400, easing = FastOutSlowInEasing)) { -distance },
-        exit = shrinkVertically(tween(280, easing = FastOutSlowInEasing), shrinkTowards = Alignment.Top) +
-            fadeOut(tween(220)) + scaleOut(tween(280), .7f, TransformOrigin(.5f, 0f)) +
-            slideOutVertically(tween(280)) { -distance }) { content() }
+    RetainedFoldout(expanded, "focus-link") { content() }
 }
 
 @Composable
@@ -328,16 +329,12 @@ private fun ChoiceSetting(label: String, chosen: Boolean, colors: Palette, selec
 
 @Composable
 private fun FieldLabel(label: String, colors: Palette) {
-    Text(label, color = colors.muted, fontSize = 11.sp, letterSpacing = .4.sp)
+    UiHeading(label, colors, size = 11)
 }
 
 @Composable
 private fun SettingAction(label: String, colors: Palette, enabled: Boolean = true, action: () -> Unit) {
-    Row(Modifier.fillMaxWidth().background(colors.word.copy(alpha = .08f)).clickable(enabled = enabled, onClick = action)
-        .padding(horizontal = 12.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, Modifier.weight(1f), color = if (enabled) colors.word else colors.muted, fontSize = 13.sp)
-        Text("→", color = if (enabled) colors.word else colors.muted, fontFamily = ReadingFont, fontSize = 19.sp)
-    }
+    JumpLink(label, colors, Modifier.fillMaxWidth().padding(vertical = 6.dp), enabled, 13, onClick = action)
 }
 
 @Composable

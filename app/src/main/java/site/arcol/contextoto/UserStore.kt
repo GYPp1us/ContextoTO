@@ -142,6 +142,15 @@ class SecureSettings(private val context: Context) {
     var guideStep: Int
         get() = prefs.getInt("guide_step_v1", -1)
         set(value) { prefs.edit().putInt("guide_step_v1", value).apply() }
+    var randomImportCount: Int
+        get() = prefs.getInt("random_import_count", 10).coerceIn(1, 500)
+        set(value) { prefs.edit().putInt("random_import_count", value.coerceIn(1, 500)).apply() }
+    var dailyReviewLimit: Int
+        get() = prefs.getInt("daily_review_limit", 0).coerceIn(0, 2000)
+        set(value) { prefs.edit().putInt("daily_review_limit", value.coerceIn(0, 2000)).apply() }
+    var cutoutFactor: Float
+        get() = prefs.getFloat("cutout_factor", .7f).coerceIn(.3f, 1.5f)
+        set(value) { prefs.edit().putFloat("cutout_factor", value.coerceIn(.3f, 1.5f)).apply() }
     var dark: Boolean
         get() = prefs.getBoolean("dark", true)
         set(value) { prefs.edit().putBoolean("dark", value).apply() }

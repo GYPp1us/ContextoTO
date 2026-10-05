@@ -10,6 +10,62 @@ import org.json.JSONObject
 
 @RunWith(AndroidJUnit4::class)
 class LearningIntegrationTest {
+    @Test fun newWordsBeatForgottenWordsAndNoTenWordLimit() = isolated("new-first") { _, content, learning ->
+        learning.addWord("research"); learning.selfGrade("research", false, 1000)
+        val words = content.lexicon.values.filter { it.word != "research" && it.translation.isNotBlank() }.map { it.word }.sorted().take(12)
+        assertEquals(12, words.size)
+        words.forEach { learning.addWord(it) }
+        val seen = mutableSetOf<String>()
+        repeat(words.size) {
+            val q = learning.nextQuestion(now = 2 * MemoryCurve.DAY, excluded = seen)!!
+            assertNotEquals("research", q.word); assertTrue(seen.add(q.word))
+            learning.answer(q, "forget", now = 2 * MemoryCurve.DAY); learning.closeQuestion(q.id)
+        }
+        assertEquals("research", learning.nextQuestion(now = 2 * MemoryCurve.DAY, excluded = seen)!!.word)
+    }
+    @Test fun preparationIsReadOnlyAndOptionalDailyLimitCountsDistinctWords() = isolated("prefetch") { _, content, learning ->
+        learning.addWord("research"); learning.addWord(content.lexicon.values.first { it.word != "research" && it.translation.isNotBlank() }.word)
+        val q = learning.nextQuestion(now = 1000)!!
+        learning.answer(q, "remember", now = 2000)
+        val next = learning.prepareQuestion(now = 3000, excluded = setOf(q.word))!!
+        assertEquals(q.id, learning.currentQuestion()!!.id)
+        assertNull(learning.prepareQuestion(now = 3000, excluded = setOf(q.word), dailyLimit = 1))
+        learning.closeQuestion(q.id)
+        assertEquals(next.id, learning.activateQuestion(next)!!.id)
+    }
+    @Test fun revisingAnswerReplacesScoreWithoutDuplicatingHeatOrOverwritingLaterGrades() = isolated("revise") { _, _, learning ->
+        learning.addWord("research"); val q = learning.nextQuestion(now = 1000)!!
+        learning.answer(q, "forget", now = 2000)
+        learning.selfGrade(q.word, true, now = 2 * MemoryCurve.DAY)
+        learning.reviseAnswer(q, "remember"); learning.reviseAnswer(q, "remember")
+        val memory = learning.studyWord(q.word)!!.memory
+        assertEquals(2, memory.reviews); assertEquals(2 * MemoryCurve.DAY, memory.last)
+        assertEquals(2, learning.heatmap().values.sumOf { it["review"] ?: 0 })
+        learning.reportIssue(q, "多个答案成立"); learning.reviseAnswer(q, "forget")
+        assertEquals(1, learning.studyWord(q.word)!!.memory.reviews)
+    }
+    @Test fun preparedQuestionRejectsAnOptionThatBecomesARealMeaning() = isolated("stale-prefetch") { store, _, learning ->
+        learning.addWord("research")
+        val prepared = learning.prepareQuestion(now = 1000)!!
+        assertNull(learning.currentQuestion())
+        val distractor = prepared.options.first { it != prepared.answer.text }
+        store.putAnalysis(Content.sha256("v3|word-common|research"), "word", JSONObject().put("common_senses",
+            org.json.JSONArray().put(JSONObject().put("zh", distractor).put("part_of_speech", "n."))).toString())
+        assertNull(learning.activateQuestion(prepared))
+        assertNull(learning.currentQuestion())
+    }
+    @Test fun revisedArchiveCanRestoreOriginalScoreWithoutAnExtraAttempt() = isolated("revise-archive") { _, _, learning ->
+        learning.addWord("research"); val q = learning.nextQuestion(now = 1000)!!
+        learning.answer(q, "remember", now = 2000)
+        learning.reviseAnswer(q, "archive", now = 3000)
+        assertTrue(learning.studyWord(q.word)!!.archived)
+        assertEquals(0, learning.studyWord(q.word)!!.memory.reviews)
+        learning.reviseAnswer(q, "remember", now = 4000)
+        assertFalse(learning.studyWord(q.word)!!.archived)
+        assertEquals(1, learning.studyWord(q.word)!!.memory.reviews)
+        assertEquals(2000L, learning.studyWord(q.word)!!.memory.last)
+        assertEquals(1, learning.heatmap().values.sumOf { it["review"] ?: 0 })
+    }
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
     private fun <T> isolated(name: String, block: (UserStore, Content, LearningStore) -> T): T {
         val database = "rc4-$name.db"; context.deleteDatabase(database)

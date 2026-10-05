@@ -59,7 +59,8 @@ data class ReviewQuestion(val id: String, val word: String, val answer: Meaning,
     }
 }
 
-fun meaningIdentity(text: String): String = text.lowercase().replace(Regex("[\\s\\p{Punct}，。；、：]"), "")
+private val meaningPunctuation = Regex("[\\s\\p{Punct}，。；、：]")
+fun meaningIdentity(text: String): String = text.lowercase().replace(meaningPunctuation, "")
 fun dictionaryMeanings(translation: String, source: String, reference: String = ""): List<Meaning> =
     translation.split(Regex("\\s*/\\s*|；|;|\\n")).mapNotNull { raw ->
         val match = Regex("^([a-z]{1,6}\\.)\\s*(.*)", RegexOption.IGNORE_CASE).find(raw.trim())
@@ -79,14 +80,47 @@ fun dictionaryMeanings(translation: String, source: String, reference: String = 
 
 /** Known true senses of the headword can never be distractors, regardless of their source. */
 fun makeQuestion(word: String, meanings: List<Meaning>, pool: List<Pair<String, Meaning>>,
+                 now: Long, random: Random = Random.Default): ReviewQuestion? =
+    makeQuestion(word, meanings, DistractorIndex(pool), now, random)
+
+/** Normalize/index once, then sample a handful of entries, not an entire dictionary for every question. */
+class DistractorIndex(pool: List<Pair<String, Meaning>>) {
+    data class Entry(val word: String, val meaning: Meaning, val identity: String)
+    val all = pool.map { Entry(it.first, it.second, meaningIdentity(it.second.text)) }
+        .filter { it.identity.isNotBlank() }.distinctBy { it.word to it.identity }
+    val byPart = all.groupBy { it.meaning.part }
+    fun sample(word: String, excluded: Set<String>, part: String, random: Random): List<Meaning> {
+        val selected = linkedMapOf<String, Meaning>()
+        fun visit(entries: List<Entry>) {
+            if (entries.isEmpty() || selected.size >= 3) return
+            // Random sampling is bounded; a circular fallback guarantees small/overlapping pools terminate.
+            repeat(minOf(48, entries.size)) {
+                val entry = entries[random.nextInt(entries.size)]
+                if (entry.word != word && entry.identity !in excluded) selected.putIfAbsent(entry.identity, entry.meaning)
+                if (selected.size >= 3) return
+            }
+            val start = random.nextInt(entries.size)
+            for (i in entries.indices) {
+                val entry = entries[(start + i) % entries.size]
+                if (entry.word != word && entry.identity !in excluded) selected.putIfAbsent(entry.identity, entry.meaning)
+                if (selected.size >= 3) return
+            }
+        }
+        if (part.isNotBlank()) visit(byPart[part].orEmpty())
+        visit(all)
+        return selected.values.take(3)
+    }
+}
+
+data class QuestionPreparation(val label: String = "读取复习队列", val fraction: Float = 0f)
+
+fun makeQuestion(word: String, meanings: List<Meaning>, pool: DistractorIndex,
                  now: Long, random: Random = Random.Default): ReviewQuestion? {
     val senses = meanings.filter { it.text.isNotBlank() }.distinctBy { meaningIdentity(it.text) }
     if (senses.isEmpty()) return null
     val answer = senses.random(random)
     val trueMeanings = senses.map { meaningIdentity(it.text) }.toSet()
-    val candidates = pool.filter { (other, meaning) -> other != word && meaningIdentity(meaning.text) !in trueMeanings }
-        .map { it.second }.distinctBy { meaningIdentity(it.text) }.shuffled(random)
-        .sortedBy { if (answer.part.isNotBlank() && it.part == answer.part) 0 else 1 }
+    val candidates = pool.sample(word, trueMeanings, answer.part, random)
     if (candidates.size < 3) return null
     val options = (candidates.take(3).map { it.text } + answer.text).shuffled(random)
     return ReviewQuestion(UUID.randomUUID().toString(), word, answer, options, options.indexOf(answer.text), now)
