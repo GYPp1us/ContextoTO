@@ -5,6 +5,16 @@ import org.junit.Test
 import kotlin.random.Random
 
 class InteractionTest {
+    @Test fun releaseAfterHoldingFingerHasNoStaleFlingVelocity() {
+        val tracker = androidx.compose.ui.input.pointer.util.VelocityTracker()
+        tracker.addPosition(0, androidx.compose.ui.geometry.Offset.Zero)
+        val end = androidx.compose.ui.geometry.Offset(100f, 0f)
+        tracker.addPosition(20, end)
+        tracker.addPosition(40, end + androidx.compose.ui.geometry.Offset(100f, 0f))
+        assertTrue(tracker.calculateVelocity().x > 0)
+        tracker.addPosition(1000, end + androidx.compose.ui.geometry.Offset(100f, 0f))
+        assertEquals(0f, tracker.calculateVelocity().x, .001f)
+    }
     @Test fun deckAnchorsAreBoundedAndVelocitySelectsAdjacentPage() {
         assertEquals(0f, deckTarget(.3f, 0f), .001f)
         assertEquals(1f, deckTarget(.3f, 4f), .001f)

@@ -562,6 +562,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     }
     BoxWithConstraints(Modifier.fillMaxSize().background(colors.paper).clipToBounds().pointerInput(modalOverlay) {
         val tracker = VelocityTracker()
+        var lastDragPosition = Offset.Zero
         var dragBounds: ClosedFloatingPointRange<Float> = -.6f..1f
         var returningFromSettings = false
         detectHorizontalDragGestures(onDragStart = { start ->
@@ -573,15 +574,20 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                 wordPage || deck.position.value > .5f -> 0f..1.6f
                 else -> -.6f..1f
             }
-            tracker.resetTracking(); tracker.addPosition(android.os.SystemClock.uptimeMillis(), start)
+            tracker.resetTracking(); lastDragPosition = start
+            tracker.addPosition(android.os.SystemClock.uptimeMillis(), start)
             if (!modalOverlay) deckScope.launch(start = CoroutineStart.UNDISPATCHED) { deck.startDrag() }
         }, onHorizontalDrag = { change, delta ->
             if (!modalOverlay && !deck.swapping) {
-                change.consume(); tracker.addPosition(change.uptimeMillis, change.position)
+                change.consume(); lastDragPosition = change.position
+                tracker.addPosition(change.uptimeMillis, change.position)
                 deckScope.launch(start = CoroutineStart.UNDISPATCHED) { deck.drag(-delta / size.width, dragBounds) }
             }
         }, onDragCancel = { if (!modalOverlay) selectDeck(deckTarget(deck.position.value, 0f, dragBounds, returningFromSettings)) },
             onDragEnd = {
+                // A held finger has no recent MOVE events. Include release time so
+                // a pause is not mistaken for the velocity of the previous move.
+                tracker.addPosition(android.os.SystemClock.uptimeMillis(), lastDragPosition)
                 if (!modalOverlay && !deck.swapping) selectDeck(deckTarget(deck.position.value, -tracker.calculateVelocity().x / size.width, dragBounds, returningFromSettings))
             })
     }) {
