@@ -6,15 +6,26 @@ import org.json.JSONObject
 import java.security.MessageDigest
 import java.text.BreakIterator
 import java.util.Locale
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 
 data class Article(val id: String, val kind: String, val title: String, val paragraphs: List<String>)
-data class Lexeme(val word: String, val translation: String, val band: String?, val examFreq: Int?, val rank: Int?, val gap: Boolean)
+data class Lexeme(val word: String, val translation: String, val band: String?, val examFreq: Int?, val rank: Int?, val gap: Boolean,
+                  val ipaUk: String = "", val ipaUs: String = "")
 data class Token(val text: String, val start: Int, val end: Int)
 data class Sentence(val text: String, val start: Int, val end: Int)
 
 class Content(context: Context) {
-    val articles: List<Article>
-    val lexicon: Map<String, Lexeme>
+    var articles by mutableStateOf<List<Article>>(emptyList())
+        private set
+    var lexicon by mutableStateOf<Map<String, Lexeme>>(emptyMap())
+        private set
+    var banks by mutableStateOf<List<WordBank>>(emptyList())
+        private set
+    private var builtinArticles: List<Article> = emptyList()
+    private var builtinLexicon: Map<String, Lexeme> = emptyMap()
+    private val aliases = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     init {
         val articleArray = JSONArray(context.assets.open("articles.json").bufferedReader().use { it.readText() })
@@ -31,11 +42,21 @@ class Content(context: Context) {
                 obj.optString("exam_freq").toIntOrNull(), obj.optString("rank").toIntOrNull(),
                 obj.optBoolean("gap", false))
         }
+        builtinArticles = articles; builtinLexicon = lexicon
+        banks = listOf(WordBank("builtin", "考纲 4801 · 主背 3000", builtinLexicon))
     }
+
+    fun refresh(imported: List<Article>, importedBanks: List<WordBank>, savedAliases: Map<String, String>) {
+        aliases.putAll(savedAliases)
+        articles = builtinArticles + imported
+        banks = listOf(WordBank("builtin", "考纲 4801 · 主背 3000", builtinLexicon)) + importedBanks
+        lexicon = importedBanks.flatMap { it.words.entries }.associate { it.key to it.value } + builtinLexicon
+    }
+    fun rememberLemma(surface: String, lemma: String) { aliases.putIfAbsent(surface.lowercase(Locale.US), lemma) }
 
     fun lexeme(surface: String): Lexeme? = candidates(surface).firstNotNullOfOrNull { lexicon[it] }
 
-    fun lemma(surface: String): String = lexeme(surface)?.word ?: surface.lowercase(Locale.US)
+    fun lemma(surface: String): String = aliases[surface.lowercase(Locale.US)] ?: lexeme(surface)?.word ?: surface.lowercase(Locale.US)
 
     private fun candidates(surface: String): List<String> {
         val word = surface.lowercase(Locale.US).trim('’', '\'', '-')

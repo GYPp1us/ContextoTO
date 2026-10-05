@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -142,11 +143,11 @@ private fun palette(dark: Boolean) = if (dark) Palette(
     Color(0xFF5D7B72), Color(0xFFA87562), Color(0xFF897999), Color(0xFFA48656)
 )
 
-private data class GlyphCharacter(val text: String, val rect: Rect, val baseline: Float, val sizePx: Float, val color: Color,
+internal data class GlyphCharacter(val text: String, val rect: Rect, val baseline: Float, val sizePx: Float, val color: Color,
                                   val weight: FontWeight = FontWeight.Normal)
-private data class TokenGlyph(val token: Token, val rect: Rect, val baseline: Float, val sizePx: Float, val color: Color,
+internal data class TokenGlyph(val token: Token, val rect: Rect, val baseline: Float, val sizePx: Float, val color: Color,
                               val characters: List<GlyphCharacter> = emptyList())
-private data class WordTarget(val paragraphIndex: Int, val token: Token, val anchor: TokenGlyph, val inSentence: Boolean)
+internal data class WordTarget(val paragraphIndex: Int, val token: Token, val anchor: TokenGlyph, val inSentence: Boolean)
 private data class SentenceTarget(val paragraphIndex: Int, val sentence: Sentence, val sourceGlyphs: List<TokenGlyph>)
 private data class ReaderScale(val bodySize: Float, val lineFactor: Float, val sideMargin: Float, val paragraphGap: Float)
 private data class ArticleSentence(val paragraphIndex: Int, val number: Int, val sentence: Sentence)
@@ -159,6 +160,19 @@ private data class SilentRunState(
 @Composable
 private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettings, engine: AnalysisEngine) {
     val activity = androidx.compose.ui.platform.LocalContext.current as ComponentActivity
+    val learning = remember { LearningStore(store, content) }
+    var wordPage by remember { mutableStateOf(false) }
+    var wordMenu by remember { mutableStateOf(false) }
+    var studyBusy by remember { mutableStateOf(false) }
+    var importKind by remember { mutableStateOf<Boolean?>(null) }
+    var focusOpen by remember { mutableStateOf(false) }
+    var guideStep by remember { mutableIntStateOf(if (settings.guideStep >= 0) settings.guideStep else if (store.getPlace() != null) 3 else 0) }
+    var regenerate by remember { mutableStateOf<String?>(null) }
+    var forceWord by remember { mutableStateOf<Set<WordModule>>(emptySet()) }
+    var forceSentence by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var sourceJump by remember { mutableStateOf<Appearance?>(null) }
+    var reviewReturn by remember { mutableStateOf(false) }
+    LaunchedEffect(wordPage) { if (wordPage) reviewReturn = false }
     val initial = remember { store.getPlace() }
     var articleIndex by remember { mutableIntStateOf(content.articles.indexOfFirst { it.id == initial?.articleId }.coerceAtLeast(0)) }
     val article = content.articles[articleIndex]
@@ -296,7 +310,11 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     fun advanceBookmark(index: Int, offset: Int = 0) {
         if (index in article.paragraphs.indices) {
             val place = BookmarkPlace(index, Content.sentenceAt(article.paragraphs[index], offset).start)
-            if (place > bookmarkPlace) bookmarkPlace = store.advanceSentenceBookmark(article.id, place)
+            if (place > bookmarkPlace) {
+                bookmarkPlace = store.advanceSentenceBookmark(article.id, place)
+                // Consecutive auto-scroll movements coalesce to one activity per 30-second window.
+                learning.activity("bookmark", "${article.id}|${System.currentTimeMillis() / 30_000}")
+            }
         }
     }
     LaunchedEffect(article.id, listState, bookmarkPlace) {
@@ -363,6 +381,10 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
     }
     fun closeTop() {
         when {
+            regenerate != null -> regenerate = null
+            importKind != null -> importKind = null
+            guideStep < 4 -> { guideStep = 4; settings.guideStep = 4 }
+            focusOpen -> focusOpen = false
             updateOpen -> closeUpdate()
             settingsOpen -> settingsOpen = false
             silentOpen -> {
@@ -373,9 +395,13 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
             wordTarget != null -> wordTarget = null
             sentenceOpen != null -> sentenceOpen = null
             drawerOpen -> drawerOpen = false
+            wordMenu -> wordMenu = false
+            wordPage -> wordPage = false
+            reviewReturn -> { wordPage = true; reviewReturn = false }
         }
     }
-    BackHandler(updateOpen || settingsOpen || silentOpen || wordTarget != null || sentenceOpen != null || drawerOpen) { closeTop() }
+    BackHandler(updateOpen || settingsOpen || silentOpen || wordTarget != null || sentenceOpen != null || drawerOpen ||
+        importKind != null || focusOpen || regenerate != null || guideStep < 4 || wordPage || reviewReturn) { closeTop() }
 
     LaunchedEffect(article.id, listState) {
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
@@ -383,12 +409,12 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                 store.savePlace(article.id, item, offset)
             }
     }
-    LaunchedEffect(focusUrl, focusSubjectId, focusItemId, appResumed, drawerOpen, settingsOpen, updateOpen) {
+    LaunchedEffect(focusUrl, focusSubjectId, focusItemId, appResumed, drawerOpen, wordMenu, settingsOpen, updateOpen, importKind, guideStep) {
         if (focusUrl.isBlank() || focusSubjectId <= 0 || focusItemId <= 0) {
             focusStatus = "未配置专注上报"
             return@LaunchedEffect
         }
-        if (!appResumed || drawerOpen || settingsOpen || updateOpen) {
+        if (!appResumed || drawerOpen || wordMenu || settingsOpen || updateOpen || importKind != null || guideStep < 4) {
             focusStatus = "阅读暂停 · 已停止上报"
             return@LaunchedEffect
         }
@@ -432,20 +458,27 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
             else article.paragraphs.getOrNull(target.paragraphIndex) ?: return@LaunchedEffect
         val cached = engine.cachedWord(provider, text, target.token)
         wordResult = cached
-        if (engine.wordComplete(provider, text, target.token)) {
-            store.recordLookup(article.id, "word", content.lemma(target.token.text)); lookupEpoch++
+        if (forceWord.isEmpty() && engine.wordComplete(provider, text, target.token)) {
+            learning.recordAppearance(article, target.paragraphIndex, target.token, cached); lookupEpoch++
         } else if (provider.key.isBlank()) {
+            if (content.lexeme(target.token.text) != null || cached != null) {
+                learning.recordAppearance(article, target.paragraphIndex, target.token, cached); lookupEpoch++
+            }
             val missing = cached?.optJSONArray("_missing_modules")
             wordError = if (cached == null) "尚未配置 API Key，可先查看预置词典。" else
                 "已有缓存已保留；待补${(0 until (missing?.length() ?: 0)).joinToString("、") { missing?.optString(it).orEmpty() }}。配置 API Key 后只查询缺项。"
         } else {
             try {
-                wordResult = engine.word(provider, article, target.paragraphIndex, target.token) { wordProgress = it }
+                wordResult = engine.word(provider, article, target.paragraphIndex, target.token, forceWord) { wordProgress = it }
+                forceWord = emptySet()
                 wordProgress = null
                 store.recordLookup(article.id, "word", content.lemma(target.token.text)); lookupEpoch++
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) {
                 wordResult = engine.cachedWord(provider, text, target.token)
+                if (wordResult != null || content.lexeme(target.token.text) != null) {
+                    learning.recordAppearance(article, target.paragraphIndex, target.token, wordResult); lookupEpoch++
+                }
                 wordError = readableQueryError(error); wordProgress = null
             }
         }
@@ -454,64 +487,86 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         val target = sentenceOpen ?: return@LaunchedEffect
         sentenceResult = null; sentenceProgress = null; sentenceError = null
         val cached = engine.cachedSentence(provider, target.sentence.text)
-        if (cached != null) {
+        if (cached != null && forceSentence.isEmpty()) {
             sentenceResult = cached
             store.recordLookup(article.id, "sentence", "${target.paragraphIndex}:${target.sentence.start}"); lookupEpoch++
+            learning.activity("lookup", "sentence|${article.id}|${target.paragraphIndex}|${target.sentence.start}")
             cacheEpoch++
         } else if (provider.key.isBlank()) {
             sentenceError = "尚未配置 API Key。英文原句仍可阅读。"
         } else {
-            store.recordLookup(article.id, "sentence", "${target.paragraphIndex}:${target.sentence.start}"); lookupEpoch++
             try {
-                    sentenceResult = engine.sentence(provider, article, target.sentence) { sentenceProgress = it }
+                    sentenceResult = engine.sentence(provider, article, target.sentence, forceModules = forceSentence) { sentenceProgress = it }
+                    forceSentence = emptySet()
                     sentenceProgress = null
                     store.recordLookup(article.id, "sentence", "${target.paragraphIndex}:${target.sentence.start}"); lookupEpoch++
+                    learning.activity("lookup", "sentence|${article.id}|${target.paragraphIndex}|${target.sentence.start}")
                     cacheEpoch++
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { sentenceError = readableQueryError(error); sentenceProgress = null }
         }
     }
 
-    val hasOverlay = drawerOpen || settingsOpen || silentOpen || sentenceOpen != null || wordTarget != null
+    val hasOverlay = drawerOpen || wordMenu || settingsOpen || silentOpen || sentenceOpen != null || wordTarget != null ||
+        studyBusy || importKind != null || focusOpen || guideStep < 4 || regenerate != null
     val blur by animateFloatAsState(if (hasOverlay) 26f else 0f, tween(290, easing = FastOutSlowInEasing), label = "body blur")
     val updateBlur by animateFloatAsState(if (updateOpen) 26f else 0f,
         tween(290, easing = FastOutSlowInEasing), label = "settings blur")
+    val regenerateBlur by animateFloatAsState(if (regenerate != null) 26f else 0f,
+        tween(240, easing = FastOutSlowInEasing), label = "regeneration menu blur")
     val currentWordMotion = if (wordTarget != null && wordTarget != lastWord) 0f else wordMotion.value
     val currentSentenceMotion = if (sentenceOpen != null && sentenceOpen != lastSentence) 0f else sentenceMotion.value
 
-    BoxWithConstraints(Modifier.fillMaxSize().background(colors.paper)) {
+    LaunchedEffect(article.id, sourceJump) {
+        sourceJump?.takeIf { it.articleId == article.id }?.let { occurrence ->
+            listState.scrollToItem((occurrence.paragraph + 1).coerceAtLeast(0))
+            if (occurrence.paragraph >= 0) {
+                val layout = snapshotFlow { paragraphLayouts[occurrence.paragraph] }.first { it != null }!!
+                val line = layout.getLineForOffset(occurrence.start.coerceIn(0, layout.layoutInput.text.length - 1))
+                listState.scrollToItem(occurrence.paragraph + 1, layout.getLineTop(line).roundToInt())
+            }
+            sourceJump = null
+        }
+    }
+    BoxWithConstraints(Modifier.fillMaxSize().background(colors.paper).clipToBounds().pointerInput(article.id, hasOverlay, wordPage) {
+        var distance = 0f
+        detectHorizontalDragGestures(onHorizontalDrag = { _, delta -> if (!hasOverlay) distance += delta },
+            onDragEnd = {
+                if (!hasOverlay && abs(distance) > 58f) {
+                    if (wordPage) { if (distance > 0) wordPage = false else wordMenu = true }
+                    else { if (distance > 0) drawerOpen = true else wordPage = true }
+                }
+                distance = 0f
+            })
+    }) {
         val width = maxWidth
         val height = maxHeight
         val density = LocalDensity.current
         val safeTop = with(density) { WindowInsets.safeDrawing.getTop(this).toDp() }
-        val topReserve = safeTop + if (customStatusBar) 8.dp else with(density) { (scale.bodySize * scale.lineFactor * .8f).sp.toDp() }
+        val topReserve = if (customStatusBar) 6.dp else safeTop + with(density) { (scale.bodySize * scale.lineFactor * .8f).sp.toDp() }
+        val cutoutTop = with(density) { WindowInsets.displayCutout.getTop(this).toDp() }
+        val cutouts = activity.window.decorView.rootWindowInsets?.displayCutout?.boundingRects.orEmpty()
+        val widthPx = with(density) { width.toPx() }
+        val leftEdge = if (customStatusBar) with(density) { (cutouts.filter { it.centerX() < widthPx / 3 }.maxOfOrNull { it.right } ?: 0).toDp() } else 0.dp
+        val rightEdge = if (customStatusBar) with(density) { (cutouts.filter { it.centerX() > widthPx * 2 / 3 }.maxOfOrNull { widthPx - it.left } ?: 0f).toDp() } else 0.dp
+        val pageShift by animateFloatAsState(if (wordPage) with(density) { width.toPx() } else 0f,
+            tween(380, easing = FastOutSlowInEasing), label = "reading words slide")
         val drawerShift by animateFloatAsState(if (drawerOpen) with(density) { (width * .60f).toPx() } else 0f,
             tween(340, easing = FastOutSlowInEasing), label = "drawer shift")
-        Box(Modifier.fillMaxSize().pointerInput(article.id, hasOverlay) {
-            var distance = 0f
-            detectHorizontalDragGestures(onHorizontalDrag = { _, delta -> distance += delta },
-                onDragEnd = {
-                    if (!hasOverlay && abs(distance) > 58f) drawerOpen = true
-                    distance = 0f
-                })
-        }.graphicsLayer {
-            translationX = drawerShift
+        Box(Modifier.fillMaxSize().graphicsLayer {
+            translationX = drawerShift - pageShift
             renderEffect = if (blur > 0.1f) BlurEffect(blur, blur, TileMode.Clamp) else null
         }) {
             Column(Modifier.fillMaxSize().navigationBarsPadding().padding(top = topReserve)) {
-                Row(Modifier.fillMaxWidth().padding(start = scale.sideMargin.dp, end = scale.sideMargin.dp, top = 22.dp, bottom = 18.dp),
+                Row(Modifier.fillMaxWidth().heightIn(min = if (customStatusBar) cutoutTop.coerceAtLeast(42.dp) else 42.dp)
+                    .padding(start = maxOf(scale.sideMargin.dp, leftEdge + 8.dp), end = maxOf(scale.sideMargin.dp, rightEdge + 8.dp),
+                        top = if (customStatusBar) 6.dp else 22.dp, bottom = if (customStatusBar) 8.dp else 18.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    Text("≡", Modifier.clickable { drawerOpen = true }.padding(end = 18.dp), color = colors.ink, fontSize = 27.sp)
                     if (customStatusBar) {
-                        Column(Modifier.weight(1f)) {
-                            Text(smallCapsTitle(article.title, 14f), color = colors.ink, fontFamily = ReadingFont,
-                                fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Row(Modifier.padding(top = 5.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                Text("$clockLabel · ${article.id.uppercase()}", color = colors.muted, fontSize = 10.sp)
-                                FocusStatusLabel(focusStatus, colors) { settingsOpen = true }
-                            }
-                        }
+                        FocusStatusLabel(focusStatus, colors) { focusOpen = true }
+                        Spacer(Modifier.weight(1f))
                     } else {
+                        Text("≡", Modifier.clickable { drawerOpen = true }.padding(end = 18.dp), color = colors.ink, fontSize = 27.sp)
                         Text("ContextoTO", color = colors.ink, fontFamily = ReadingFont, fontSize = 19.sp)
                         Spacer(Modifier.weight(1f))
                         Text(article.id.uppercase(), color = colors.muted, fontSize = 12.sp, fontFamily = ReadingFont)
@@ -542,10 +597,15 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                 }
                 Row(Modifier.fillMaxWidth().padding(horizontal = scale.sideMargin.dp).padding(bottom = 16.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    if (!customStatusBar) FocusStatusLabel(focusStatus, colors) { settingsOpen = true }
-                    if (customStatusBar) Text("沉浸阅读", color = colors.muted, fontSize = 10.sp)
-                    Spacer(Modifier.weight(1f))
-                    Text(if (activeQuery != null) "查询进度（估算）" else "句子缓存", color = colors.muted, fontSize = 10.sp)
+                    if (!customStatusBar) FocusStatusLabel(focusStatus, colors) { focusOpen = true }
+                    if (customStatusBar) {
+                        Text("≡", Modifier.clickable { drawerOpen = true }.padding(end = 12.dp), color = colors.ink, fontSize = 23.sp)
+                        Text(smallCapsTitle(article.title, 16f), color = colors.ink, fontFamily = ReadingFont,
+                            fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        Text(article.id.uppercase().take(8), color = colors.muted, fontSize = 11.sp, modifier = Modifier.padding(start = 8.dp))
+                    }
+                    if (!customStatusBar) Spacer(Modifier.weight(1f))
+                    if (!customStatusBar) Text(if (activeQuery != null) "查询进度（估算）" else "句子缓存", color = colors.muted, fontSize = 10.sp)
                     Spacer(Modifier.width(16.dp))
                     val bookmarkNumber = articleSentences.firstOrNull { it.paragraphIndex == bookmarkPlace.paragraph &&
                         it.sentence.start == bookmarkPlace.sentenceStart }?.number ?: 1
@@ -563,7 +623,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                     start = scale.sideMargin.dp, end = scale.sideMargin.dp, bottom = 64.dp
                 )) {
                     item(key = "title") {
-                        Text("READING / ${articleIndex + 1} OF 48", color = colors.word, fontSize = 11.sp,
+                        Text("READING / ${articleIndex + 1} OF ${content.articles.size}", color = colors.word, fontSize = 11.sp,
                             fontWeight = FontWeight.Bold, letterSpacing = 1.6.sp)
                         Spacer(Modifier.height(10.dp))
                         val sourceSentence = sentenceOpen ?: lastSentence.takeIf { sentenceMotion.value > .001f }
@@ -624,6 +684,15 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                 }
             }
         }
+        StudyPage(content, learning, engine, provider, colors, Modifier.fillMaxSize().graphicsLayer {
+            translationX = with(density) { width.toPx() } - pageShift
+        }, if (customStatusBar) topReserve else safeTop, wordPage, wordMenu, { wordMenu = it },
+            settingsOpen || importKind != null || guideStep < 4 || focusOpen, focusStatus, { focusOpen = true },
+            { settingsOpen = true }, { importKind = true }, { guideStep = 0; settings.guideStep = 0 }, { studyBusy = it }, cutoutTop,
+            onSource = { occurrence ->
+                val index = content.articles.indexOfFirst { it.id == occurrence.articleId }
+                if (index >= 0) { articleIndex = index; sourceJump = occurrence; wordPage = false; reviewReturn = true }
+            })
         if (drawerOpen) GlassScrim(colors) { drawerOpen = false }
         AnimatedVisibility(drawerOpen, Modifier.align(Alignment.CenterStart),
             enter = fadeIn(tween(220)) + slideInHorizontally(tween(340, easing = FastOutSlowInEasing)) { -it / 5 },
@@ -633,14 +702,15 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                 onSelect = { index ->
                     articleIndex = index; wordTarget = null; sentenceOpen = null; drawerOpen = false
                     store.savePlace(content.articles[index].id, 0, 0)
-                }, onSettings = { drawerOpen = false; settingsOpen = true })
+                }, onSettings = { drawerOpen = false; settingsOpen = true },
+                onImport = { drawerOpen = false; importKind = false }, onGuide = { drawerOpen = false; guideStep = 0; settings.guideStep = 0 })
         }
 
         val activeSentence = sentenceOpen ?: lastSentence
         if (sentenceOpen != null) GlassScrim(colors) { sentenceOpen = null; wordTarget = null }
         if (activeSentence != null) {
             val sentenceY = topReserve + 8.dp
-            val secondBlur by animateFloatAsState(if (wordTarget?.inSentence == true) 23f else 0f,
+            val secondBlur by animateFloatAsState(if (wordTarget?.inSentence == true || regenerate != null) 23f else 0f,
                 tween(220), label = "sentence behind word blur")
             AnimatedVisibility(sentenceOpen != null,
                 enter = fadeIn(tween(220)), exit = fadeOut(tween(340))) {
@@ -660,7 +730,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
                             wordDestination = null
                             wordTarget = WordTarget(activeSentence.paragraphIndex, absolute,
                                 anchor.copy(token = absolute), true)
-                        }, onRetry = { retrySentence++ })
+                        }, onRetry = { retrySentence++ }, onAction = { regenerate = "sentence" })
                 }
             }
         }
@@ -669,12 +739,13 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         if (wordTarget != null && wordTarget?.inSentence == false) GlassScrim(colors) { wordTarget = null }
         val displayWord = wordTarget ?: lastWord
         AnimatedVisibility(wordTarget != null,
+            modifier = Modifier.graphicsLayer { renderEffect = if (regenerateBlur > .1f) BlurEffect(regenerateBlur, regenerateBlur, TileMode.Clamp) else null },
             enter = fadeIn(tween(160)), exit = fadeOut(tween(310))) {
             if (displayWord != null) WordSheet(displayWord, article, content, wordResult, wordProgress, wordError, colors,
                 maxWidth, maxHeight, topReserve, currentWordMotion, onTitleGeometry = { wordDestination = it },
                 onRetry = { retryWord++ }, onConfigure = {
                     wordTarget = null; sentenceOpen = null; settingsOpen = true
-                })
+                }, onAction = { regenerate = "word" })
         }
 
         val flightSentence = sentenceOpen ?: lastSentence
@@ -701,6 +772,30 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
         if (flightAnchor != null && percentDestination != null) {
             MotionGlyphs(listOf(flightAnchor!!), listOf(percentDestination!!), percentMotion.value, silentOpen)
         }
+        if (regenerate != null) {
+            GlassScrim(colors) { regenerate = null }
+            val wordChoices = WordModule.entries.map { it.label } + "全部"
+            val sentenceChoices = listOf("整句翻译", "从句划分", "词汇讲解", "全部")
+            SimpleChoiceSheet("重新生成", colors, topReserve + 35.dp, if (regenerate == "word") wordChoices else sentenceChoices) { choice ->
+                if (regenerate == "word") {
+                    forceWord = if (choice == "全部") WordModule.entries.toSet() else WordModule.entries.filter { it.label == choice }.toSet()
+                    retryWord++
+                } else {
+                    forceSentence = when (choice) { "整句翻译" -> setOf("translation_zh"); "从句划分" -> setOf("clauses")
+                        "词汇讲解" -> setOf("glosses"); else -> setOf("translation_zh", "clauses", "glosses") }
+                    retrySentence++
+                }
+                regenerate = null
+            }
+        }
+        if (focusOpen) {
+            GlassScrim(colors) { focusOpen = false }
+            SimpleChoiceSheet("Focus / $clockLabel", colors, topReserve + 40.dp, listOf(focusStatus, "上报设置 →")) {
+                if (it == "上报设置 →") { focusOpen = false; settingsOpen = true }
+            }
+        }
+        importKind?.let { vocabulary -> ImportOverlay(vocabulary, content, learning, colors, topReserve) { importKind = null } }
+        if (guideStep < 4) GuideOverlay(guideStep, colors, topReserve) { guideStep = it; settings.guideStep = it }
 
         if (settingsOpen) {
             GlassScrim(colors) { settingsOpen = false }
@@ -779,7 +874,7 @@ private fun ReaderApp(content: Content, store: UserStore, settings: SecureSettin
 }
 
 @Composable
-private fun FocusStatusLabel(status: String, colors: Palette, onClick: () -> Unit) {
+internal fun FocusStatusLabel(status: String, colors: Palette, onClick: () -> Unit) {
     val active = status.startsWith("正在记录")
     val label = when {
         active -> "专注 · 已上报"
@@ -804,11 +899,11 @@ private fun readableQueryError(error: Throwable): String = when {
 }
 
 @Composable
-private fun GlassScrim(colors: Palette, onDismiss: () -> Unit) {
+internal fun GlassScrim(colors: Palette, onDismiss: () -> Unit) {
     Box(Modifier.fillMaxSize().background(colors.glass).clickable(onClick = onDismiss))
 }
 
-private fun measuredGlyph(token: Token, visible: AnnotatedString, layout: TextLayoutResult, position: Offset,
+internal fun measuredGlyph(token: Token, visible: AnnotatedString, layout: TextLayoutResult, position: Offset,
                           fontPx: Float, fontSp: Float, ink: Color): TokenGlyph {
     val characters = (token.start until token.end).map { index ->
         val box = layout.getBoundingBox(index)
@@ -878,7 +973,7 @@ private fun InteractiveParagraph(
 }
 
 @Composable
-private fun MotionGlyphs(source: List<TokenGlyph>, destination: List<TokenGlyph>, progress: Float, active: Boolean) {
+internal fun MotionGlyphs(source: List<TokenGlyph>, destination: List<TokenGlyph>, progress: Float, active: Boolean) {
     if (progress >= 1f || (progress <= .001f && !active) || source.isEmpty() || destination.isEmpty()) return
     val context = androidx.compose.ui.platform.LocalContext.current
     val regular = remember { context.resources.getFont(R.font.tinos_regular) }
@@ -976,14 +1071,17 @@ private fun smallCapsTitle(title: String, fullSize: Float, firstLarge: Boolean =
 @Composable
 private fun ArticleDrawer(
     content: Content, store: UserStore, activeId: String, epoch: Int, colors: Palette, modifier: Modifier,
-    onSelect: (Int) -> Unit, onSettings: () -> Unit
+    onSelect: (Int) -> Unit, onSettings: () -> Unit, onImport: () -> Unit, onGuide: () -> Unit
 ) {
     val lastId = remember(epoch) { store.getPlace()?.articleId ?: activeId }
-    Column(modifier.background(colors.sheet).padding(top = 30.dp)) {
+    Column(modifier.padding(top = 30.dp).pointerInput(Unit) {
+        var drag = 0f
+        detectHorizontalDragGestures(onHorizontalDrag = { _, dx -> drag += dx }, onDragEnd = { if (drag < -58) onSelect(content.articles.indexOfFirst { it.id == activeId }.coerceAtLeast(0)); drag = 0f })
+    }) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 25.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("ARTICLES", color = colors.ink, fontSize = 25.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Serif)
             Spacer(Modifier.weight(1f))
-            Text("48", color = colors.word, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Text("${content.articles.size}", color = colors.word, fontSize = 14.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(8.dp))
         Text("继续阅读 / 已查询词 / 已查询句", Modifier.padding(horizontal = 25.dp), color = colors.muted, fontSize = 11.sp)
@@ -1010,6 +1108,10 @@ private fun ArticleDrawer(
                     }
                 }
             }
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 25.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+            Text("导入文章 →", Modifier.clickable(onClick = onImport), color = colors.word, fontSize = 14.sp)
+            Text("使用引导", Modifier.clickable(onClick = onGuide), color = colors.muted, fontSize = 13.sp)
         }
         Row(Modifier.fillMaxWidth().clickable(onClick = onSettings).padding(25.dp)) {
             Text("接口与外观设置", color = colors.ink, fontSize = 14.sp, fontWeight = FontWeight.Bold)
@@ -1170,7 +1272,7 @@ private fun SentenceSheet(
     content: Content, store: UserStore, colors: Palette, scale: ReaderScale,
     markQueriedWords: Boolean, queryRevision: Int, motion: Float,
     nestedWord: WordTarget?, modifier: Modifier,
-    onGeometry: (List<TokenGlyph>) -> Unit, onWord: (Token, TokenGlyph) -> Unit, onRetry: () -> Unit
+    onGeometry: (List<TokenGlyph>) -> Unit, onWord: (Token, TokenGlyph) -> Unit, onRetry: () -> Unit, onAction: () -> Unit
 ) {
     val text = target.sentence.text
     val queried = remember(article.id, result, markQueriedWords, queryRevision) {
@@ -1179,8 +1281,11 @@ private fun SentenceSheet(
     Column(modifier.navigationBarsPadding().verticalScroll(rememberScrollState())
         .padding(horizontal = 24.dp, vertical = 28.dp)) {
         RevealElement(0, target) {
-            Text("SENTENCE / ${article.id.uppercase()}", color = colors.paragraph, fontSize = 11.sp,
-                fontWeight = FontWeight.Bold, letterSpacing = 1.7.sp)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("SENTENCE / ${if (article.kind == "导入") "LOCAL" else article.id.uppercase()}", color = colors.paragraph, fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold, letterSpacing = 1.7.sp, modifier = Modifier.weight(1f))
+                Text("↻", Modifier.clickable(onClick = onAction).padding(10.dp), color = colors.word, fontSize = 20.sp)
+            }
         }
         Spacer(Modifier.height(13.dp))
         InteractiveParagraph(text, colors, result, content, queried,
@@ -1266,11 +1371,13 @@ private fun SentenceSheet(
 }
 
 @Composable
-private fun WordSheet(
+internal fun WordSheet(
     target: WordTarget, article: Article, content: Content, result: JSONObject?, progress: QueryProgress?,
     error: String?, colors: Palette, screenWidth: androidx.compose.ui.unit.Dp, screenHeight: androidx.compose.ui.unit.Dp,
     topReserve: androidx.compose.ui.unit.Dp, motion: Float, onTitleGeometry: (TokenGlyph) -> Unit,
-    onRetry: () -> Unit, onConfigure: () -> Unit
+    onRetry: () -> Unit, onConfigure: () -> Unit, onAction: (() -> Unit)? = null,
+    heading: String = "WORD / ${if (article.kind == "导入") "LOCAL" else article.id.uppercase()}", allowQueries: Boolean = true,
+    beforeSenses: @Composable () -> Unit = {}, afterContent: @Composable () -> Unit = {}
 ) {
     val density = LocalDensity.current
     val panelWidth = screenWidth * .86f
@@ -1294,8 +1401,12 @@ private fun WordSheet(
         .navigationBarsPadding()
         .verticalScroll(rememberScrollState()).padding(horizontal = 5.dp, vertical = 10.dp)) {
         RevealElement(0, target) {
-            Text("WORD / ${article.id.uppercase()}", color = colors.word, fontSize = 11.sp,
-                fontWeight = FontWeight.Bold, letterSpacing = 1.7.sp)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(heading, color = colors.word, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.7.sp, modifier = Modifier.weight(1f))
+                if (onAction != null) Text(if (heading.startsWith("REVIEW")) "⚑" else "↻",
+                    Modifier.clickable(onClick = onAction).padding(10.dp), color = colors.word, fontSize = 20.sp)
+            }
         }
         Spacer(Modifier.height(8.dp))
         Text(title, modifier = Modifier.graphicsLayer {
@@ -1310,7 +1421,7 @@ private fun WordSheet(
             fontSize = 42.sp, lineHeight = 47.sp, fontWeight = FontWeight.Normal)
         Spacer(Modifier.height(5.dp))
         RevealElement(1, target) {
-            Text(labelsFor(lexeme).joinToString("   ·   ").ifBlank { "语境词" }, color = colors.word,
+            Text(content.banks.filter { content.lemma(target.token.text) in it.words }.joinToString(" · ") { it.name }.ifBlank { "语境词" }, color = colors.word,
                 fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = .3.sp)
         }
         val phonetics = result?.optJSONObject("phonetics")
@@ -1327,6 +1438,7 @@ private fun WordSheet(
             }
         }
         Spacer(Modifier.height(25.dp))
+        beforeSenses()
         if (result != null && result.optJSONObject("context_sense") != null) {
             val contextSense = result.optJSONObject("context_sense")
             RevealElement(2, result) {
@@ -1365,7 +1477,7 @@ private fun WordSheet(
                     SenseLine(part, meaning, colors)
                 }
             }
-            if (lexeme == null && common != null) {
+            if (common != null) {
                 for (i in 0 until common.length()) {
                     val item = common.optJSONObject(i) ?: continue
                     RevealElement(6 + i, senseKey to i, Modifier.fillMaxWidth()) {
@@ -1374,6 +1486,17 @@ private fun WordSheet(
                 }
             }
             Spacer(Modifier.height(22.dp))
+        }
+        content.banks.filter { content.lemma(target.token.text) in it.words && it.words[content.lemma(target.token.text)]?.translation != lexeme?.translation }.forEach { bank ->
+            val entry = bank.words.getValue(content.lemma(target.token.text))
+            RevealElement(8, bank.id to target) {
+                Column(Modifier.fillMaxWidth().padding(bottom = 18.dp)) {
+                    Text("词库提供 · ${bank.name}", color = colors.word, fontSize = 11.sp, modifier = Modifier.padding(bottom = 10.dp))
+                    splitDictionarySenses(entry.translation).forEach { (part, meaning) -> SenseLine(part, meaning, colors) }
+                    if (entry.ipaUk.isNotBlank() || entry.ipaUs.isNotBlank()) Text("UK ${entry.ipaUk}  US ${entry.ipaUs}", color = colors.muted,
+                        fontFamily = ReadingFont, fontSize = 13.sp)
+                }
+            }
         }
         val derivatives = result?.optJSONArray("derivatives")
         if (derivatives != null && derivatives.length() > 0) {
@@ -1402,7 +1525,7 @@ private fun WordSheet(
             Text("不在预置词表中", color = colors.muted, fontSize = 13.sp)
         }
         val missing = result?.optJSONArray("_missing_modules")
-        if ((result == null || (missing?.length() ?: 0) > 0) && error == null) RevealElement(6, target) {
+        if (allowQueries && (result == null || (missing?.length() ?: 0) > 0) && error == null) RevealElement(6, target) {
             ProgressBlock(progress, colors, if (result == null) "正在解析" else
                 "补全 · ${(0 until (missing?.length() ?: 0)).joinToString(" / ") { missing?.optString(it).orEmpty() }}")
         }
@@ -1417,6 +1540,8 @@ private fun WordSheet(
                 }
             }
         }
+        afterContent()
+        Spacer(Modifier.height(32.dp))
     }
 }
 
@@ -1427,7 +1552,7 @@ private fun splitDictionarySenses(translation: String): List<Pair<String, String
     }
 
 @Composable
-private fun SenseLine(part: String, meaning: String, colors: Palette) {
+internal fun SenseLine(part: String, meaning: String, colors: Palette) {
     Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), verticalAlignment = Alignment.Top) {
         Text(abbreviatePartOfSpeech(part.ifBlank { "释义" }), color = colors.word, fontFamily = ReadingFont,
             fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(50.dp).padding(top = 2.dp),
@@ -1445,7 +1570,7 @@ private fun labelsFor(lexeme: Lexeme?): List<String> = buildList {
 }
 
 @Composable
-private fun ProgressBlock(progress: QueryProgress?, colors: Palette, label: String = "正在解析") {
+internal fun ProgressBlock(progress: QueryProgress?, colors: Palette, label: String = "正在解析") {
     val phase = progress?.phase ?: QueryPhase.CONTEXT
     val phases = listOf("拼接上下文", "等待首字返回", "接收完整结果")
     val active = when (phase) {

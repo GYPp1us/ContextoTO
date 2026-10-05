@@ -25,7 +25,22 @@ data class BookmarkPlace(val paragraph: Int = 0, val sentenceStart: Int = 0) : C
     override fun compareTo(other: BookmarkPlace): Int = compareValuesBy(this, other, { it.paragraph }, { it.sentenceStart })
 }
 
-class UserStore(context: Context, databaseName: String = "contextoto.db") : SQLiteOpenHelper(context, databaseName, null, 3) {
+class UserStore(context: Context, databaseName: String = "contextoto.db") : SQLiteOpenHelper(context, databaseName, null, 4) {
+    init {
+        // Best-effort pre-upgrade recovery copy. SQLiteOpenHelper also runs upgrades in one transaction.
+        val source = context.getDatabasePath(databaseName)
+        if (source.exists()) runCatching {
+            val oldVersion = SQLiteDatabase.openDatabase(source.path, null, SQLiteDatabase.OPEN_READONLY).use { it.version }
+            if (oldVersion in 1..3) listOf("", "-wal").forEach { suffix ->
+                val part = java.io.File(source.path + suffix)
+                val backup = java.io.File(source.path + ".before-rc4" + suffix)
+                if (part.exists() && !backup.exists()) part.copyTo(backup)
+            }
+        }
+    }
+    private val learningEpoch = kotlinx.coroutines.flow.MutableStateFlow(0)
+    val learningRevision = learningEpoch
+    fun bumpLearningRevision() { learningEpoch.value += 1 }
     override fun onConfigure(db: SQLiteDatabase) {
         db.enableWriteAheadLogging()
         db.setForeignKeyConstraintsEnabled(true)
@@ -35,6 +50,7 @@ class UserStore(context: Context, databaseName: String = "contextoto.db") : SQLi
         db.execSQL("CREATE TABLE lookup_event(article_id TEXT NOT NULL, kind TEXT NOT NULL, item_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(article_id,kind,item_id))")
         db.execSQL("CREATE TABLE reading_place(singleton INTEGER PRIMARY KEY CHECK(singleton=1), article_id TEXT NOT NULL, item_index INTEGER NOT NULL, item_offset INTEGER NOT NULL)")
         createBookmarks(db)
+        LearningStore.create(db)
     }
     private fun createBookmarks(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE IF NOT EXISTS bookmark(article_id TEXT PRIMARY KEY, paragraph_index INTEGER NOT NULL, sentence_start INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL)")
@@ -42,10 +58,14 @@ class UserStore(context: Context, databaseName: String = "contextoto.db") : SQLi
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createBookmarks(db)
         if (oldVersion == 2) db.execSQL("ALTER TABLE bookmark ADD COLUMN sentence_start INTEGER NOT NULL DEFAULT 0")
+        if (oldVersion < 4) LearningStore.create(db)
     }
 
     fun getAnalysis(key: String): String? = readableDatabase.rawQuery("SELECT payload FROM analysis WHERE cache_key=?", arrayOf(key)).use {
         if (it.moveToFirst()) it.getString(0) else null
+    }
+    fun analysisTime(key: String): Long = readableDatabase.rawQuery("SELECT created_at FROM analysis WHERE cache_key=?", arrayOf(key)).use {
+        if (it.moveToFirst()) it.getLong(0) else 0L
     }
     fun putAnalysis(key: String, kind: String, payload: String) {
         val values = ContentValues().apply {
@@ -119,6 +139,9 @@ class UserStore(context: Context, databaseName: String = "contextoto.db") : SQLi
 class SecureSettings(private val context: Context) {
     private val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private val alias = "contextoto_provider_key_v1"
+    var guideStep: Int
+        get() = prefs.getInt("guide_step_v1", -1)
+        set(value) { prefs.edit().putInt("guide_step_v1", value).apply() }
     var dark: Boolean
         get() = prefs.getBoolean("dark", true)
         set(value) { prefs.edit().putBoolean("dark", value).apply() }

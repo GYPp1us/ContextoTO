@@ -4,7 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 
 class ContextoApplication : Application() {
-    val content by lazy { Content(this) }
+    val content by lazy { Content(this).also { LearningStore(store, it).refreshContent() } }
     val store by lazy { UserStore(this) }
     val settings by lazy { SecureSettings(this) }
     val engine by lazy {
