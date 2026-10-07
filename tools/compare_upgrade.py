@@ -10,7 +10,8 @@ parser.add_argument("--after", type=Path, required=True)
 args = parser.parse_args()
 before = sqlite3.connect(args.before.resolve().as_uri() + "?mode=ro", uri=True)
 after = sqlite3.connect(args.after.resolve().as_uri() + "?mode=ro", uri=True)
-assert before.execute("PRAGMA user_version").fetchone()[0] == 4
+previous_schema = before.execute("PRAGMA user_version").fetchone()[0]
+assert previous_schema in (4, 5)
 assert after.execute("PRAGMA user_version").fetchone()[0] == 5
 tables = ("study_word", "occurrence", "review_question", "review_attempt", "question_issue", "activity_event", "word_bank", "imported_article", "word_alias", "lookup_event", "reading_place", "bookmark")
 available = {row[0] for row in before.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -22,7 +23,7 @@ for table in tables:
     current = after.execute('SELECT * FROM "' + table + '"').fetchall()
     # The existing idempotent schema migration backfills identity aliases from
     # legacy lookup events. It may add mappings, but must retain every old one.
-    if table == "word_alias":
+    if table == "word_alias" and previous_schema == 4:
         assert set(original) <= set(current), "An existing alias was changed or lost"
     else:
         assert set(original) == set(current), f"Private-state rows changed: {table}"
@@ -39,5 +40,5 @@ cache = dict(after.execute("SELECT cache_key,payload FROM analysis"))
 old_cache = list(before.execute("SELECT cache_key,payload FROM analysis"))
 for key, value in old_cache:
     assert key in cache and supplemented(json.loads(value), json.loads(cache[key])), "Existing analysis was lost or overwritten"
-print(json.dumps({"schema": "4 -> 5", "private_tables_unchanged": counts, "old_analyses_preserved": len(old_cache), "new_analysis_count": len(cache)}, ensure_ascii=False))
+print(json.dumps({"schema": f"{previous_schema} -> 5", "private_tables_unchanged": counts, "old_analyses_preserved": len(old_cache), "new_analysis_count": len(cache)}, ensure_ascii=False))
 before.close(); after.close()
