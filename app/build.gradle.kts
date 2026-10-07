@@ -11,8 +11,8 @@ android {
         applicationId = "site.arcol.contextoto"
         minSdk = 31
         targetSdk = 35
-        versionCode = 13
-        versionName = "1.0.0-rc5"
+        versionCode = 14
+        versionName = "1.0.0-rc6"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

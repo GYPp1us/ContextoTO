@@ -83,6 +83,8 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
     var destination by remember { mutableStateOf<TokenGlyph?>(null) }
     var actionsWord by remember { mutableStateOf<String?>(null) }
     var actionsQuestion by remember { mutableStateOf<ReviewQuestion?>(null) }
+    var actionsAnchor by remember { mutableStateOf(Offset.Zero) }
+    var studyCoordinates by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
     var issueOpen by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
     var heatDay by remember { mutableStateOf<String?>(null) }
@@ -180,14 +182,14 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
         tween(290), label = "study blur")
     val blur = maxOf(modalBlur, GLASS_BLUR * menuFraction)
     val detailBlur by animateFloatAsState(if (issueOpen || actionsWord != null || externalOverlay) GLASS_BLUR else 0f, tween(240), label = "study detail blur")
-    BoxWithConstraints(modifier) {
+    BoxWithConstraints(modifier.onGloballyPositioned { studyCoordinates = it }) {
         val pageWidth = maxWidth; val pageHeight = maxHeight
         val studyLayer = rememberGraphicsLayer()
         var headerHeight by remember { mutableStateOf(106.dp) }
         Box(Modifier.fillMaxSize().graphicsLayer {
             translationX = pageOffset; scaleX = cardScale; scaleY = cardScale; alpha = cardAlpha
         }) {
-        Column(Modifier.fillMaxWidth().zIndex(1f).onSizeChanged { headerHeight = with(density) { it.height.toDp() } }.graphicsLayer {
+        Column(Modifier.fillMaxWidth().zIndex(1f).quietClickable { }.onSizeChanged { headerHeight = with(density) { it.height.toDp() } }.graphicsLayer {
             renderEffect = if (blur > .1f) BlurEffect(blur, blur, TileMode.Clamp) else null
         }) {
             FrostedBar(studyLayer, colors, modifier = Modifier.fillMaxWidth()) {
@@ -200,7 +202,7 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                     onGlyph = { percentSource = it }, ink = colors.word)
             }
             Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 12.dp, bottom = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-                UiHeading(mode, colors, Modifier.weight(1f), 26)
+                UiHeading(mode, colors, Modifier.weight(1f), 25)
                 Text("生词  /  ${state.count { !it.archived }}", color = colors.muted, fontSize = 11.sp)
                 Text("≡", Modifier.clickable { onMenu(true) }.padding(start = 16.dp), color = colors.ink, fontSize = 25.sp)
             }
@@ -279,8 +281,13 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                         if (rows.isEmpty()) item { Text("这里还没有单词", color = colors.muted, modifier = Modifier.padding(top = 25.dp)) }
                         items(rows, key = { it.word }) { word ->
                             var glyph by remember { mutableStateOf<TokenGlyph?>(null) }
-                            Column(Modifier.fillMaxWidth().combinedClickable(onClick = { glyph?.let { destination = null; detail = StudyDetail(word.word, it) } },
-                                onLongClick = { actionsQuestion = null; actionsWord = word.word }).padding(vertical = 14.dp)) {
+                            var coordinates by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
+                            Column(Modifier.fillMaxWidth().onGloballyPositioned { coordinates = it }.pointerInput(word.word) {
+                                detectTapGestures(onTap = { glyph?.let { destination = null; detail = StudyDetail(word.word, it) } }, onLongPress = { point ->
+                                    actionsAnchor = (coordinates?.localToRoot(point) ?: point) - (studyCoordinates?.positionInRoot() ?: Offset.Zero)
+                                    actionsQuestion = null; actionsWord = word.word
+                                })
+                            }.padding(vertical = 14.dp)) {
                                 StudyWordText(word.word, 25f, colors, (detail ?: lastDetail.takeIf { motion.value > .001f })?.word == word.word && destination != null, onGlyph = { glyph = it })
                                 val brief = remember(word.word, epoch, cacheRevision) { learning.meanings(word.word).firstOrNull()?.text.orEmpty() }
                                 Text(brief.ifBlank { "释义待补齐" }, color = colors.muted, fontFamily = FontFamily.Serif, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp))
@@ -298,13 +305,16 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
         }
         if (active || menuFraction > .001f) Box(Modifier.fillMaxSize().zIndex(2f)) {
         if (menuFraction > .001f) {
-            Box(Modifier.fillMaxSize().background(colors.paper.copy(alpha = GLASS_TINT * menuFraction)).clickable { onMenu(false) })
+            Box(Modifier.fillMaxSize().background(colors.paper.copy(alpha = GLASS_TINT * menuFraction)).quietClickable { onMenu(false) })
             Column(Modifier.align(Alignment.CenterEnd).width(pageWidth * .8f).fillMaxHeight().graphicsLayer {
                 translationX = with(density) { pageWidth.toPx() } * .16f * (1f - menuFraction); alpha = menuFraction
             }.padding(top = top + 28.dp).verticalScroll(rememberScrollState()).padding(horizontal = 30.dp), verticalArrangement = Arrangement.spacedBy(28.dp)) {
-                UiHeading("WORDS", colors, size = 38)
-                listOf("复习", "列表", "词库").forEachIndexed { i, item -> RevealElement(i, menuOpen) {
-                    Text(uiTitle(item), Modifier.fillMaxWidth().clickable {
+                UiHeading("WORDS", colors, size = 25)
+                listOf("复习", "列表", "词库").forEachIndexed { i, item -> Box(Modifier.graphicsLayer {
+                    val amount = ((menuFraction - i * .08f) / (1f - i * .08f)).coerceIn(0f, 1f)
+                    alpha = amount; translationY = -8.dp.toPx() * (1f - amount)
+                }) {
+                    Text(uiTitle(item), Modifier.fillMaxWidth().quietClickable {
                         if (mode == item) onMenu(false) else onSwitchMode { mode = item }
                     }.padding(vertical = 12.dp),
                         color = if (mode == item) colors.word else colors.ink, fontSize = 23.sp, fontFamily = ReadingFont, fontWeight = FontWeight.Bold)
@@ -317,7 +327,9 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
         val displayed = detail ?: lastDetail
         if (detail != null || motion.value > .001f) {
             if (displayed?.question != null) Box(Modifier.fillMaxSize().background(colors.paper.copy(alpha = GLASS_TINT * motion.value)).pointerInput(displayed.question) {
-                detectTapGestures(onTap = { closeDetail() }, onLongPress = { if (detail != null) { actionsQuestion = displayed.question; actionsWord = displayed.word } })
+                detectTapGestures(onTap = { closeDetail() }, onLongPress = { point -> if (detail != null) {
+                    actionsAnchor = point; actionsQuestion = displayed.question; actionsWord = displayed.word
+                } })
             }) else GlassScrim(colors, motion.value) { closeDetail() }
         }
         AnimatedVisibility(detail != null, enter = fadeIn(tween(160)), exit = fadeOut(tween(310)) +
@@ -334,7 +346,10 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                     onAction = if (displayed.question != null) ({ issueOpen = true }) else null,
                     heading = if (displayed.question != null) "REVIEW / ANSWER" else "WORD / COLLECTION", allowQueries = false,
                     onBlankTap = if (displayed.question != null) ({ closeDetail() }) else null,
-                    onHold = if (displayed.question != null) ({ actionsQuestion = displayed.question; actionsWord = displayed.word }) else null,
+                    onHold = if (displayed.question != null) ({ point ->
+                        actionsAnchor = point - (studyCoordinates?.positionInRoot() ?: Offset.Zero)
+                        actionsQuestion = displayed.question; actionsWord = displayed.word
+                    }) else null,
                     beforeSenses = {
                         displayed.question?.let { q -> RevealElement(3, q.id) {
                             Column(Modifier.fillMaxWidth().padding(bottom = 22.dp)) {
@@ -367,20 +382,22 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
         if (active && displayed != null && destination != null && !issueOpen && (detail != null || displayed.question == null))
             MotionGlyphs(listOf(displayed.anchor), listOf(destination!!), motion.value, detail != null)
         if (actionsWord != null) {
-            GlassScrim(colors) { actionsWord = null; actionsQuestion = null }
-            SimpleChoiceSheet(actionsWord!!, colors, top + 60.dp, listOf("记住了", "忘记了", "不要了"), contentTitle = true) { choice ->
+            if (detail != null) Box(Modifier.fillMaxSize().quietClickable { actionsWord = null; actionsQuestion = null })
+            else GlassScrim(colors) { actionsWord = null; actionsQuestion = null }
+            NearbyChoices(actionsWord!!, colors, actionsAnchor, pageWidth, pageHeight, top) { choice ->
                 val word = actionsWord!!
                 val revisedQuestion = actionsQuestion
                 if (revisedQuestion != null) {
                     val revised = learning.reviseAnswer(revisedQuestion, when (choice) { "记住了" -> "remember"; "忘记了" -> "forget"; else -> "archive" })
                     question = revised; detail = detail?.copy(question = revised)
+                    closeDetail()
                 } else when (choice) { "记住了" -> learning.selfGrade(word, true); "忘记了" -> learning.selfGrade(word, false)
                     "不要了" -> learning.archive(word, true); else -> learning.archive(word, false) }
                 actionsWord = null; actionsQuestion = null; message = "$word · $choice"
             }
         }
         if (issueOpen && displayed?.question != null) {
-            GlassScrim(colors) { issueOpen = false }
+            Box(Modifier.fillMaxSize().quietClickable { issueOpen = false })
             SimpleChoiceSheet("题目错误", colors, top + 50.dp, listOf("干扰义项与正确义相近", "多个答案成立", "正确释义有误", "词形 / 上下文不匹配", "其他")) {
                 learning.reportIssue(displayed.question, it); issueOpen = false; message = "已记录问题，仅撤销本次评分"
             }
@@ -441,6 +458,25 @@ internal fun SimpleChoiceSheet(title: String, colors: Palette, top: Dp, choices:
 }
 
 @Composable
+private fun NearbyChoices(word: String, colors: Palette, anchor: Offset, width: Dp, height: Dp, safeTop: Dp, onSelect: (String) -> Unit) {
+    val density = LocalDensity.current
+    val menuWidth = minOf(240.dp, width * .66f)
+    val x = (with(density) { anchor.x.toDp() } - menuWidth / 2).coerceIn(16.dp, (width - menuWidth - 16.dp).coerceAtLeast(16.dp))
+    val fingerY = with(density) { anchor.y.toDp() }
+    val estimated = 200.dp
+    val y = (if (fingerY + estimated + 40.dp < height) fingerY + 12.dp else fingerY - estimated - 12.dp)
+        .coerceIn(safeTop + 12.dp, (height - estimated - 36.dp).coerceAtLeast(safeTop + 12.dp))
+    Column(Modifier.offset(x, y).width(menuWidth)) {
+        RevealElement(0, word to anchor) { Text(word, color = colors.ink, fontFamily = ReadingFont, fontSize = 20.sp,
+            modifier = Modifier.padding(bottom = 12.dp)) }
+        listOf("记住了", "忘记了", "不要了").forEachIndexed { index, label -> RevealElement(index + 1, word to anchor) {
+            Text(label, Modifier.fillMaxWidth().quietClickable { onSelect(label) }.padding(vertical = 15.dp), color = colors.word,
+                fontFamily = FontFamily.SansSerif, fontSize = 16.sp)
+        } }
+    }
+}
+
+@Composable
 private fun OccurrenceDetails(word: String, content: Content, learning: LearningStore, revision: Int, colors: Palette,
                               onSource: (Appearance) -> Unit) {
     val occurrences = remember(word, revision) { learning.appearances(word) }
@@ -459,7 +495,7 @@ private fun OccurrenceDetails(word: String, content: Content, learning: Learning
                 RetainedFoldout(expanded, "occurrence-${occurrence.id}") { RevealElement(0, occurrence.id) {
                     Column(Modifier.padding(top = 10.dp)) {
                         Text(occurrence.sentence, color = colors.ink, fontFamily = ReadingFont, fontSize = 18.sp, lineHeight = 26.sp)
-                        Text("${occurrence.surface} · ${java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(occurrence.queriedAt))}",
+                        Text("${occurrence.surface}${if (!occurrence.surface.equals(word, true)) " → 原型 $word" else ""} · ${java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(occurrence.queriedAt))}",
                             color = colors.muted, fontSize = 10.sp, modifier = Modifier.padding(top = 8.dp))
                         if (article != null) JumpLink("回到原文", colors) { onSource(occurrence) }
                     }
@@ -538,6 +574,7 @@ private fun StudyLibraries(content: Content, learning: LearningStore, state: Lis
         Row(Modifier.fillMaxWidth().padding(top = 8.dp)) { Text(start.toString(), color = colors.muted, fontSize = 9.sp)
             Spacer(Modifier.weight(1f)); Text(end.toString(), color = colors.muted, fontSize = 9.sp) }
         JumpLink("导入词库", colors, Modifier.padding(vertical = 30.dp), onClick = onImport)
+        BankManagementSection(bank, content, learning, colors, onMessage)
     }
 }
 

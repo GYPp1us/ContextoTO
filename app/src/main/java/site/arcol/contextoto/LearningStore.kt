@@ -58,7 +58,8 @@ class LearningStore(private val store: UserStore, private val content: Content) 
                 }
             }
             if (preview.words.isNotEmpty()) {
-                val previous = content.banks.firstOrNull { it.id == mergeBank && it.id != "builtin" }
+                require(mergeBank !in setOf("builtin", "general")) { "预置词库只读，请新建自定义库" }
+                val previous = content.banks.firstOrNull { it.id == mergeBank && it.id !in setOf("builtin", "general") }
                 val id = previous?.id ?: "bank-${UUID.randomUUID()}"
                 val words = (previous?.words?.values.orEmpty() + preview.words).groupBy { it.word }.map { (_, entries) ->
                     entries.last().copy(translation = entries.map { it.translation }.distinct().joinToString(" / "))
@@ -115,9 +116,10 @@ class LearningStore(private val store: UserStore, private val content: Content) 
     }
     fun recordAppearance(article: Article, paragraphIndex: Int, token: Token, analysis: JSONObject?, now: Long = System.currentTimeMillis()) {
         val paragraph = if (paragraphIndex < 0) article.title else article.paragraphs.getOrNull(paragraphIndex) ?: return
-        val suggested = content.lemma(token.text)
+        val suggested = analysis?.optString("lemma")?.takeIf { it.isNotBlank() } ?: content.lemma(token.text)
         val surface = token.text.lowercase(java.util.Locale.US)
-        val word = db.rawQuery("SELECT word FROM word_alias WHERE surface=?", arrayOf(surface)).use { if (it.moveToFirst()) it.getString(0) else suggested }
+        val word = if (analysis?.optString("lemma").isNullOrBlank()) db.rawQuery("SELECT word FROM word_alias WHERE surface=?", arrayOf(surface))
+            .use { if (it.moveToFirst()) it.getString(0) else suggested } else suggested
         val sentence = Content.sentenceAt(paragraph, token.start)
         val id = Content.sha256("${article.id}|${Content.sha256(paragraph)}|$paragraphIndex|${token.start}|${token.end}")
         val sense = analysis?.optJSONObject("context_sense")
@@ -125,8 +127,10 @@ class LearningStore(private val store: UserStore, private val content: Content) 
             val prior = db.rawQuery("SELECT meaning,part FROM occurrence WHERE id=?", arrayOf(id)).use {
                 if (it.moveToFirst()) it.getString(0) to it.getString(1) else "" to ""
             }
-            insert("word_alias", ContentValues().apply { put("surface", surface); put("word", word) })
-            content.rememberLemma(surface, word)
+            if (content.localIdentity(token.text) != null) {
+                insert("word_alias", ContentValues().apply { put("surface", surface); put("word", word) })
+                content.rememberLemma(surface, word)
+            }
             store.recordLookup(article.id, "word", word)
             addWord(word, now)
             insert("occurrence", ContentValues().apply {
@@ -149,11 +153,38 @@ class LearningStore(private val store: UserStore, private val content: Content) 
     fun meanings(word: String): List<Meaning> = buildList {
         appearances(word).forEach { if (it.meaning.isNotBlank()) add(Meaning(it.meaning, it.part, "原句", it.id)) }
         content.banks.forEach { bank -> bank.words[word]?.let { addAll(dictionaryMeanings(it.translation, bank.name, bank.id)) } }
+        db.rawQuery("SELECT bank_id,bank_name,translation FROM retained_bank_meaning WHERE word=?", arrayOf(word)).use {
+            while (it.moveToNext()) addAll(dictionaryMeanings(it.getString(2), "已移除词库 · ${it.getString(1)}", it.getString(0)))
+        }
         val common = store.getAnalysis(Content.sha256("v3|word-common|$word"))?.let { JSONObject(it).optJSONArray("common_senses") }
         for (i in 0 until (common?.length() ?: 0)) common?.optJSONObject(i)?.let {
             if (it.optString("zh").isNotBlank()) add(Meaning(it.optString("zh"), it.optString("part_of_speech"), "通用解析", "$word:$i"))
         }
     }.distinctBy { meaningIdentity(it.text) }
+
+    fun renameBank(id: String, name: String) {
+        require(id !in setOf("builtin", "general") && name.isNotBlank()) { "只可重命名自定义词库" }
+        db.update("word_bank", ContentValues().apply { put("name", name.trim().take(120)) }, "id=?", arrayOf(id))
+        refreshContent(); changed()
+    }
+    fun mergeBank(source: String, destination: String): Int {
+        require(source != destination && destination !in setOf("builtin", "general")) { "请选择另一个自定义词库" }
+        val from = content.banks.first { it.id == source }; val to = content.banks.first { it.id == destination }
+        return commitImport(ImportPreview(emptyList(), from.words.values.toList(), emptyList(), to.name), to.name, destination).second
+    }
+    fun deleteBank(id: String) {
+        require(id !in setOf("builtin", "general")) { "预置词库只读" }
+        val bank = content.banks.first { it.id == id }
+        transaction {
+            studyWords().forEach { study -> bank.words[study.word]?.let { lexeme ->
+                insert("retained_bank_meaning", ContentValues().apply {
+                    put("word", study.word); put("bank_id", id); put("bank_name", bank.name); put("translation", lexeme.translation)
+                }, true)
+            } }
+            db.delete("word_bank", "id=?", arrayOf(id))
+        }
+        refreshContent(); changed()
+    }
 
     fun currentQuestion(): ReviewQuestion? = db.rawQuery("SELECT payload FROM review_question WHERE closed=0 ORDER BY created_at DESC LIMIT 1", null).use {
         if (it.moveToFirst()) ReviewQuestion.parse(JSONObject(it.getString(0))) else null
@@ -299,6 +330,8 @@ class LearningStore(private val store: UserStore, private val content: Content) 
     }
     companion object {
         fun create(db: SQLiteDatabase) {
+            db.execSQL("CREATE TABLE IF NOT EXISTS analysis_seed_install(hash TEXT PRIMARY KEY,installed_at INTEGER NOT NULL)")
+            db.execSQL("CREATE TABLE IF NOT EXISTS retained_bank_meaning(word TEXT NOT NULL,bank_id TEXT NOT NULL,bank_name TEXT NOT NULL,translation TEXT NOT NULL,PRIMARY KEY(word,bank_id))")
             db.execSQL("CREATE TABLE IF NOT EXISTS lookup_event(article_id TEXT NOT NULL,kind TEXT NOT NULL,item_id TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(article_id,kind,item_id))")
             db.execSQL("CREATE TABLE IF NOT EXISTS imported_article(id TEXT PRIMARY KEY,payload TEXT NOT NULL,created_at INTEGER NOT NULL)")
             db.execSQL("CREATE TABLE IF NOT EXISTS word_bank(id TEXT PRIMARY KEY,name TEXT NOT NULL,payload TEXT NOT NULL,created_at INTEGER NOT NULL)")

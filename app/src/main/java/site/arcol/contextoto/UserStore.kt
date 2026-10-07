@@ -25,15 +25,15 @@ data class BookmarkPlace(val paragraph: Int = 0, val sentenceStart: Int = 0) : C
     override fun compareTo(other: BookmarkPlace): Int = compareValuesBy(this, other, { it.paragraph }, { it.sentenceStart })
 }
 
-class UserStore(context: Context, databaseName: String = "contextoto.db") : SQLiteOpenHelper(context, databaseName, null, 4) {
+class UserStore(context: Context, databaseName: String = "contextoto.db") : SQLiteOpenHelper(context, databaseName, null, 5) {
     init {
         // Best-effort pre-upgrade recovery copy. SQLiteOpenHelper also runs upgrades in one transaction.
         val source = context.getDatabasePath(databaseName)
         if (source.exists()) runCatching {
             val oldVersion = SQLiteDatabase.openDatabase(source.path, null, SQLiteDatabase.OPEN_READONLY).use { it.version }
-            if (oldVersion in 1..3) listOf("", "-wal").forEach { suffix ->
+            if (oldVersion in 1..4) listOf("", "-wal").forEach { suffix ->
                 val part = java.io.File(source.path + suffix)
-                val backup = java.io.File(source.path + ".before-rc4" + suffix)
+                val backup = java.io.File(source.path + if (oldVersion == 4) ".before-rc6$suffix" else ".before-rc4$suffix")
                 if (part.exists() && !backup.exists()) part.copyTo(backup)
             }
         }
@@ -58,7 +58,7 @@ class UserStore(context: Context, databaseName: String = "contextoto.db") : SQLi
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createBookmarks(db)
         if (oldVersion == 2) db.execSQL("ALTER TABLE bookmark ADD COLUMN sentence_start INTEGER NOT NULL DEFAULT 0")
-        if (oldVersion < 4) LearningStore.create(db)
+        if (oldVersion < 5) LearningStore.create(db)
     }
 
     fun getAnalysis(key: String): String? = readableDatabase.rawQuery("SELECT payload FROM analysis WHERE cache_key=?", arrayOf(key)).use {
@@ -89,6 +89,40 @@ class UserStore(context: Context, databaseName: String = "contextoto.db") : SQLi
                 }
                 db.insertWithOnConflict("analysis", null, values, SQLiteDatabase.CONFLICT_REPLACE)
             }
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
+    }
+
+    fun hasSeed(hash: String): Boolean = readableDatabase.rawQuery("SELECT 1 FROM analysis_seed_install WHERE hash=?", arrayOf(hash)).use { it.moveToFirst() }
+
+    /** Only whitelisted article/cache rows, one transaction; never copies private SQLite tables. */
+    fun applyAnalysisArchive(articles: List<JSONObject>, records: List<AnalysisRecord>, seedHash: String? = null) {
+        val db = writableDatabase
+        fun supplement(old: JSONObject, incoming: JSONObject): JSONObject {
+            val result = JSONObject(old.toString())
+            incoming.keys().forEach { field ->
+                val value = incoming.get(field)
+                if (value is JSONObject) result.put(field, supplement(result.optJSONObject(field) ?: JSONObject(), value))
+                else if (!result.has(field) || result.isNull(field) || result.opt(field) == "" ||
+                    field == "common_senses" && result.optJSONArray(field)?.length() == 0) result.put(field, value)
+            }
+            return result
+        }
+        db.beginTransaction()
+        try {
+            articles.forEach { article -> db.insertWithOnConflict("imported_article", null, ContentValues().apply {
+                put("id", article.getString("id")); put("payload", article.toString()); put("created_at", System.currentTimeMillis())
+            }, SQLiteDatabase.CONFLICT_IGNORE) }
+            records.forEach { record ->
+                val old = getAnalysis(record.key)?.let(::JSONObject)
+                val merged = supplement(old ?: JSONObject(), record.payload)
+                if (old == null || merged.toString() != old.toString()) db.insertWithOnConflict("analysis", null, ContentValues().apply {
+                    put("cache_key", record.key); put("kind", record.kind); put("payload", merged.toString()); put("created_at", System.currentTimeMillis())
+                }, SQLiteDatabase.CONFLICT_REPLACE)
+            }
+            seedHash?.let { db.insertWithOnConflict("analysis_seed_install", null, ContentValues().apply {
+                put("hash", it); put("installed_at", System.currentTimeMillis())
+            }, SQLiteDatabase.CONFLICT_IGNORE) }
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
     }

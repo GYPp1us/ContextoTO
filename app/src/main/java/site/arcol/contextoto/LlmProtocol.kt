@@ -5,23 +5,31 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 enum class ApiProtocol(val label: String) { CHAT("Chat Completions"), RESPONSES("Responses") }
-internal data class CompletionReply(val text: String, val reasoningTokens: Int?)
+internal data class CompletionReply(val text: String, val reasoningTokens: Int?, val reasoningChars: Int = 0)
 
 internal fun completionBody(provider: Provider, system: String, user: String, effort: String): JSONObject {
-    val reasoning = provider.official || provider.supportedEfforts.isNotEmpty() ||
-        provider.model.contains("deepseek", true) || Regex("(?i)(?:.*/)?(?:gpt-[56].*|o[1-4](?:-.*)?)").matches(provider.model)
+    require(effort == "max" || effort == "off") { "解析只使用 MAX 或关闭思考" }
+    if (effort == "max" && provider.supportedEfforts.isNotEmpty())
+        require("max" in provider.supportedEfforts) { "当前模型不支持 MAX，请更换模型；不会降档" }
+    if (effort == "off" && provider.supportedEfforts.isNotEmpty())
+        require(provider.supportedEfforts.any { it in listOf("none", "off") }) { "当前模型不能关闭思考，请更换模型；不会自动开启" }
+    // Unknown reasoning-capable models must not inherit the provider's default thinking mode.
+    val knownNonReasoning = Regex("(?i)(?:.*/)?(?:gpt-4.*|gpt-3\\.5.*)").matches(provider.model)
+    val reasoning = provider.official || provider.supportedEfforts.isNotEmpty() || !knownNonReasoning
+    val cc = runCatching { java.net.URI(provider.baseUrl).host == "api.commandcode.ai" }.getOrDefault(false)
     val body = JSONObject().put("model", provider.model).put("stream", true)
     val messages = JSONArray().put(JSONObject().put("role", "system").put("content", system))
         .put(JSONObject().put("role", "user").put("content", user))
     if (provider.protocol == ApiProtocol.RESPONSES) {
         body.put("input", messages).put("store", false)
             .put("text", JSONObject().put("format", JSONObject().put("type", "json_object")))
-        if (reasoning) body.put("reasoning", JSONObject().put("effort", modelEffort(provider, effort)))
+        if (reasoning || effort == "max") body.put("reasoning", JSONObject().put("effort", if (effort == "off") "none" else "max"))
     } else {
         body.put("messages", messages).put("stream_options", JSONObject().put("include_usage", true))
             .put("response_format", JSONObject().put("type", "json_object"))
-        if (reasoning) body.put("reasoning_effort", modelEffort(provider, effort))
-        if (provider.official) body.put("thinking", JSONObject().put("type", "enabled"))
+        if (reasoning || effort == "max") body.put("reasoning_effort", if (effort == "off")
+            if (cc) "off" else "none" else "max")
+        if (provider.official) body.put("thinking", JSONObject().put("type", if (effort == "off") "disabled" else "enabled"))
     }
     return body
 }
@@ -83,7 +91,7 @@ internal class CompletionStream(private val protocol: ApiProtocol) {
     fun finish(): CompletionReply {
         require(complete) { "模型连接提前结束，未完成内容不会写入缓存" }
         require(output.isNotBlank()) { "模型没有生成有效内容" }
-        return CompletionReply(output.toString(), reasoningTokens)
+        return CompletionReply(output.toString(), reasoningTokens, reasoningChars)
     }
 }
 
@@ -100,8 +108,11 @@ internal fun readCompletion(http: Response, protocol: ApiProtocol, report: (Quer
         val text = if (protocol == ApiProtocol.CHAT) choice?.optJSONObject("message")?.text("content").orEmpty()
             else responseOutput(json)
         require(text.isNotBlank()) { "模型没有生成有效内容" }
-        report(QueryProgress(QueryPhase.COMPLETE, receivedChars = text.length))
-        return CompletionReply(text, null)
+        val usage = json.optJSONObject("usage")?.optJSONObject(if (protocol == ApiProtocol.CHAT) "completion_tokens_details" else "output_tokens_details")
+        val tokens = if (usage?.has("reasoning_tokens") == true) usage.optInt("reasoning_tokens") else null
+        val chars = choice?.optJSONObject("message")?.text("reasoning_content").orEmpty().length
+        report(QueryProgress(QueryPhase.COMPLETE, receivedChars = text.length, exactReasoningTokens = tokens))
+        return CompletionReply(text, tokens, chars)
     }
     val stream = CompletionStream(protocol)
     val source = body.source()

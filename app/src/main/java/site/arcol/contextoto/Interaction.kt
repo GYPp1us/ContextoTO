@@ -24,6 +24,9 @@ import androidx.compose.foundation.background
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.*
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.Layout
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -32,10 +35,14 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlin.math.abs
 
 internal const val GLASS_BLUR = 34f
 internal const val GLASS_TINT = .20f
+
+internal fun Modifier.quietClickable(enabled: Boolean = true, onClick: () -> Unit): Modifier =
+    clickable(interactionSource = null, indication = null, enabled = enabled, onClick = onClick)
 
 @Composable
 internal fun FrostedBar(source: GraphicsLayer, colors: Palette, offsetY: Float = 0f,
@@ -102,8 +109,10 @@ internal fun UiHeading(title: String, colors: Palette, modifier: Modifier = Modi
 @Composable
 internal fun JumpLink(label: String, colors: Palette, modifier: Modifier = Modifier, enabled: Boolean = true,
                       size: Int = 14, bold: Boolean = false, onClick: () -> Unit) {
-    val ink = if (enabled) colors.word else colors.muted
-    Box(modifier.clickable(enabled = enabled, onClick = onClick).padding(vertical = 8.dp)) {
+    val interactions = remember { MutableInteractionSource() }
+    val pressed by interactions.collectIsPressedAsState()
+    val ink by animateColorAsState(if (!enabled) colors.muted else if (pressed) colors.ink else colors.word, tween(120), label = "link press")
+    Box(Modifier.clickable(interactionSource = interactions, indication = null, enabled = enabled, onClick = onClick).then(modifier).padding(vertical = 8.dp)) {
     Column(Modifier.width(IntrinsicSize.Max)) {
         Text(label.removeSuffix(" →"), color = ink, fontFamily = FontFamily.SansSerif,
             fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal, fontSize = size.sp)
@@ -119,10 +128,17 @@ internal fun JumpLink(label: String, colors: Palette, modifier: Modifier = Modif
 
 /** Physical page coordinate: settings=-1, directory=-.6, reading=0, words=1, menu=1.6. */
 internal fun deckTarget(position: Float, velocity: Float, bounds: ClosedFloatingPointRange<Float> = -1f..1.6f,
-                        settingsOnly: Boolean = false): Float {
+                        settingsOnly: Boolean = false, origin: Float? = null): Float {
     val anchors = if (settingsOnly) listOf(-1f, 0f) else listOf(-1f, -.6f, 0f, 1f, 1.6f)
-    val projected = (position + velocity * .12f).coerceIn(bounds.start, bounds.endInclusive)
-    return anchors.filter { it in bounds }.minBy { abs(it - projected) }
+    val candidates = anchors.filter { it in bounds }
+    val projected = (position + velocity * .15f).coerceIn(bounds.start, bounds.endInclusive)
+    if (origin != null) {
+        val index = candidates.indices.minBy { abs(candidates[it] - origin) }
+        val next = (index + if (projected >= candidates[index]) 1 else -1).coerceIn(candidates.indices)
+        if (abs(projected - candidates[index]) >= abs(candidates[next] - candidates[index]) * .4f) return candidates[next]
+        return candidates[index]
+    }
+    return candidates.minBy { abs(it - projected) }
 }
 internal fun directoryFraction(position: Float): Float =
     (if (position < -.6f) (position + 1f) / .4f else -position / .6f).coerceIn(0f, 1f)
@@ -162,61 +178,59 @@ internal class DeckMotion(private val scope: CoroutineScope) {
 }
 
 private class RetainedSpace(val scroll: ScrollState) {
-    val heights = mutableStateMapOf<Any, Int>()
-    val collapsed = mutableStateMapOf<Any, Boolean>()
-    val parents = mutableMapOf<Any, List<Any>>()
-    val visibleKeys get() = heights.keys.filter { key -> parents[key].orEmpty().none { collapsed[it] == true } }
-    val debt get() = visibleKeys.sumOf { heights[it] ?: 0 }
+    var floor by mutableIntStateOf(0)
+    var natural = 0
+    var viewport = 0
+    private val collapsing = mutableSetOf<Any>()
+    var collapseEpoch by mutableIntStateOf(0)
+    fun begin(key: Any) { collapsing.add(key); if (scroll.value > 0) floor = maxOf(floor, scroll.value + viewport) }
+    fun end(key: Any) { if (collapsing.remove(key)) collapseEpoch++ }
+    val inTransition get() = collapsing.isNotEmpty()
+    val debt get() = (floor - natural).coerceAtLeast(0)
     val connection = object : NestedScrollConnection {
         override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-            if (debt == 0 || scroll.value < scroll.maxValue - debt) return Offset.Zero
+            if (debt == 0 || scroll.value + viewport <= natural) return Offset.Zero
             if (available.y > 0f) return Offset(0f, available.y)
-            var reclaim = minOf(debt.toFloat(), -available.y).toInt()
+            val reclaim = minOf(debt.toFloat(), -available.y).toInt()
             if (reclaim <= 0) return Offset.Zero
-            val removed = reclaim
-            visibleKeys.forEach { key ->
-                val amount = minOf(heights[key] ?: 0, reclaim)
-                heights[key] = (heights[key] ?: 0) - amount; reclaim -= amount
-            }
-            // Layout above the viewport shrinks by this amount; compensate scroll to keep its anchor stable.
-            scroll.dispatchRawDelta(-removed.toFloat())
-            return Offset(0f, -removed.toFloat())
+            floor -= reclaim
+            scroll.dispatchRawDelta(-reclaim.toFloat())
+            return Offset(0f, -reclaim.toFloat())
         }
     }
 }
 private val LocalRetainedSpace = staticCompositionLocalOf<RetainedSpace?> { null }
-private val LocalFoldoutParents = staticCompositionLocalOf { emptyList<Any>() }
 
 @Composable
 internal fun RetainedColumn(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     val scroll = rememberScrollState()
     val retained = remember(scroll) { RetainedSpace(scroll) }
     CompositionLocalProvider(LocalRetainedSpace provides retained) {
-        Column(modifier.nestedScroll(retained.connection).verticalScroll(scroll), content = content)
+        Box(modifier.onSizeChanged { retained.viewport = it.height }) {
+            Layout(content = { Column(Modifier.fillMaxWidth(), content = content) },
+                modifier = Modifier.fillMaxWidth().nestedScroll(retained.connection).verticalScroll(scroll)) { measurables, constraints ->
+                retained.collapseEpoch // End of shrinking must invalidate the protected measurement.
+                val child = measurables.single().measure(constraints.copy(minHeight = 0))
+                retained.natural = child.height
+                val height = maxOf(child.height, retained.floor)
+                if (!retained.inTransition && child.height >= retained.floor && retained.floor > 0) retained.floor = 0
+                layout(child.width, height) { child.place(0, 0) }
+            }
+        }
     }
 }
 
 @Composable
 internal fun RetainedFoldout(expanded: Boolean, key: Any, content: @Composable () -> Unit) {
     val retained = LocalRetainedSpace.current
-    val parents = LocalFoldoutParents.current
-    var measured by remember(key) { mutableIntStateOf(0) }
-    val density = LocalDensity.current
-    LaunchedEffect(expanded) {
-        retained?.parents?.set(key, parents)
-        retained?.collapsed?.set(key, !expanded)
-        if (expanded) retained?.heights?.remove(key) else if (measured > 0) retained?.heights?.set(key, measured)
-    }
-    DisposableEffect(key) { onDispose { retained?.heights?.remove(key); retained?.collapsed?.remove(key); retained?.parents?.remove(key) } }
-    val reserve = if (!expanded && retained != null) retained.heights[key] ?: measured else 0
-    Box(if (reserve > 0) Modifier.height(with(density) { reserve.toDp() }).clipToBounds() else Modifier) {
+    var previous by remember(key) { mutableStateOf(expanded) }
+    SideEffect { if (previous && !expanded) retained?.begin(key); if (!previous && expanded) retained?.end(key); previous = expanded }
+    LaunchedEffect(expanded) { if (!expanded) { delay(300); retained?.end(key) } }
+    DisposableEffect(key) { onDispose { retained?.end(key) } }
         AnimatedVisibility(expanded,
             enter = expandVertically(tween(400), expandFrom = androidx.compose.ui.Alignment.Top) + fadeIn(tween(400)) +
                 scaleIn(tween(400), .7f, TransformOrigin(.5f, 0f)) + slideInVertically(tween(400)) { -12 },
-            exit = fadeOut(tween(220)) + scaleOut(tween(260), .7f, TransformOrigin(.5f, 0f))) {
-            CompositionLocalProvider(LocalFoldoutParents provides (parents + key)) {
-                Box(Modifier.onSizeChanged { if (expanded) measured = it.height }) { content() }
-            }
+            exit = fadeOut(tween(220)) + shrinkVertically(tween(260), shrinkTowards = androidx.compose.ui.Alignment.Top) + scaleOut(tween(260), .7f, TransformOrigin(.5f, 0f))) {
+            content()
         }
-    }
 }

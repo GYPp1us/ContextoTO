@@ -28,6 +28,7 @@ jobs:
       - name: Validate bundled content
         run: |
           python3 tools/import_content.py
+          python3 tools/validate_presets.py
           git diff --exit-code -- app/src/main/assets
       - name: Test and build debug APK
         run: ./gradlew testDebugUnitTest assembleDebug assembleDebugAndroidTest --no-daemon

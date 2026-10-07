@@ -15,16 +15,16 @@ class LlmProtocolTest {
         .protocol(Protocol.HTTP_1_1).code(200).message("OK")
         .body(text.toResponseBody(type.toMediaType())).build()
     @Test fun requestSchemasMatchSelectedProtocolAndDoNotPutKeysIntoJson() {
-        val chat = completionBody(provider, "Return JSON", "Test", "high")
+        val chat = completionBody(provider, "Return JSON", "Test", "max")
         assertTrue(chat.has("messages")); assertFalse(chat.has("input"))
         assertEquals("json_object", chat.getJSONObject("response_format").getString("type"))
-        val responses = completionBody(provider.copy(protocol = ApiProtocol.RESPONSES), "Return JSON", "Test", "high")
+        val responses = completionBody(provider.copy(protocol = ApiProtocol.RESPONSES), "Return JSON", "Test", "max")
         assertTrue(responses.has("input")); assertFalse(responses.has("messages"))
         assertEquals("json_object", responses.getJSONObject("text").getJSONObject("format").getString("type"))
-        assertEquals("high", responses.getJSONObject("reasoning").getString("effort"))
+        assertEquals("max", responses.getJSONObject("reasoning").getString("effort"))
         assertFalse(responses.getBoolean("store"))
         assertFalse(responses.toString().contains("fixture-token"))
-        assertFalse(completionBody(provider.copy(model = "gpt-4.1"), "JSON", "Test", "high").has("reasoning_effort"))
+        assertFalse(completionBody(provider.copy(model = "gpt-4.1"), "JSON", "Test", "off").has("reasoning_effort"))
     }
     @Test fun responsesStreamCollectsTextAndExactUsage() {
         val stream = CompletionStream(ApiProtocol.RESPONSES)

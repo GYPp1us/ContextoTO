@@ -71,7 +71,7 @@ internal fun SentenceBookmarkBackdrop(list: LazyListState, place: BookmarkPlace,
         val target = list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == "paragraph-${place.paragraph}" }
             ?: return@LaunchedEffect
         // Capture the displayed contour on interruption, so rapid queries continue from the current frame.
-        from = frame.lastBands.takeIf { it.isNotEmpty() } ?: targetBands.map { it.offset(y = target.offset.toFloat()) }
+        from = frame.lastBands.takeIf { it.isNotEmpty() } ?: targetBands.map { it.offset(y = (target.offset - list.layoutInfo.viewportStartOffset).toFloat()) }
         fromScroll = frame.lastDisplacement
         if (frame.lastBands.isEmpty()) travel.snapTo(1f) else {
             travel.snapTo(0f)
@@ -80,10 +80,10 @@ internal fun SentenceBookmarkBackdrop(list: LazyListState, place: BookmarkPlace,
     }
     Canvas(Modifier.fillMaxSize()) {
         val info = list.layoutInfo
-        frame.viewport(info.visibleItemsInfo.associate { it.key to it.offset })
+        frame.viewport(info.visibleItemsInfo.associate { it.key to (it.offset - info.viewportStartOffset) })
         val target = info.visibleItemsInfo.firstOrNull { it.key == "paragraph-${place.paragraph}" } ?: return@Canvas
         if (targetBands.isEmpty()) return@Canvas
-        val destination = targetBands.map { it.offset(y = target.offset.toFloat()) }
+        val destination = targetBands.map { it.offset(y = (target.offset - info.viewportStartOffset).toFloat()) }
         val origin = from.map { it.offset(y = frame.displacement - fromScroll) }
         val bands = interpolateBookmarkBands(origin, destination, travel.value)
         frame.lastBands = bands; frame.lastDisplacement = frame.displacement

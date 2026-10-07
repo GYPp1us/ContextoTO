@@ -67,12 +67,12 @@ class CacheIntegrationTest {
             val engine = AnalysisEngine(content, store, AnalysisTransport { _, system, _, _, report ->
                 prompts += system
                 report(QueryProgress(QueryPhase.STREAM, receivedChars = 80))
-                if (system.contains("phonetics 对象")) """{"phonetics":{"uk":"/ðə/","us":"/ðə/"}}"""
+                if (system.contains("IPA/")) """{"phonetics":{"uk":"/ðə/","us":"/ðə/"}}"""
                 else """{"context_sense":{"zh":"这","part_of_speech":"det.","evidence":"the United States"}}"""
             })
             val supplemented = engine.word(provider, article, 0, first) {}
             assertEquals("这次", supplemented.getJSONObject("context_sense").getString("zh"))
-            assertTrue(prompts[0].contains("phonetics 对象"))
+            assertTrue(prompts[0].contains("IPA/"))
             assertFalse(prompts[0].contains("context_sense 对象"))
             assertFalse(prompts[0].contains("common_senses 数组"))
             engine.word(provider, article, 0, second) {}
@@ -104,9 +104,9 @@ class CacheIntegrationTest {
             val popup = launch { engine.word(provider, article, 0, token) {} }
             began.await()
             popup.cancelAndJoin()
-            assertEquals(QueryStatus.RUNNING, engine.tasks.value.single().status)
+            assertTrue(engine.tasks.value.any { it.status == QueryStatus.RUNNING && it.id.endsWith("|word") })
             finish.complete(Unit)
-            withTimeout(10_000) { engine.tasks.first { it.singleOrNull()?.status == QueryStatus.COMPLETE } }
+            withTimeout(10_000) { engine.tasks.first { tasks -> tasks.any { it.id.endsWith("|word") && it.status == QueryStatus.COMPLETE } } }
             assertTrue(engine.wordComplete(provider, article.paragraphs.first(), token))
         }
         context.deleteDatabase(name)

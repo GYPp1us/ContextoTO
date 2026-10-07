@@ -40,7 +40,7 @@ internal fun SettingsSheet(
     onDark: (Boolean) -> Unit, onMarkQueriedWords: (Boolean) -> Unit,
     onSilentInference: (Boolean) -> Unit, onCustomStatusBar: (Boolean) -> Unit,
     onBookmarkVisible: (Boolean) -> Unit, onCheckUpdate: () -> Unit,
-    onDownloadUpdate: () -> Unit, onSave: () -> Unit, onBack: () -> Unit
+    onDownloadUpdate: () -> Unit, onSave: () -> Unit, onBack: () -> Unit, onArchive: () -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -225,6 +225,9 @@ internal fun SettingsSheet(
                     }
                 }
             }
+            SettingsCategory("Data", colors)
+            SettingAction("文章与解析 · ZIP 导入导出", colors, action = onArchive)
+            Text("仅文章和解析；不包含学习记录、书签、密钥或配置。", color = colors.muted, fontSize = 11.sp, lineHeight = 18.sp)
             SettingsCategory("About", colors)
             SettingAction(if (updateChecking) "正在检查…" else "检查更新", colors, !updateChecking, onCheckUpdate)
             Text(updateStatus, Modifier.fillMaxWidth().clickable(enabled = updateInfo?.available == true,
@@ -285,7 +288,7 @@ private fun SwitchSetting(label: String, detail: String, enabled: Boolean, color
         .toggleable(enabled, role = Role.Switch, onValueChange = change).padding(horizontal = 14.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f).padding(end = 16.dp)) {
-            UiHeading(label, colors, size = 15)
+            Text(label, color = colors.ink, fontSize = 15.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.SansSerif)
             Text(detail, color = colors.muted, fontSize = 11.sp, lineHeight = 16.sp, modifier = Modifier.padding(top = 4.dp))
         }
         Box(Modifier.size(44.dp, 24.dp).background(colors.word.copy(alpha = if (enabled) .3f else .12f))) {
@@ -329,7 +332,7 @@ private fun ChoiceSetting(label: String, chosen: Boolean, colors: Palette, selec
 
 @Composable
 private fun FieldLabel(label: String, colors: Palette) {
-    UiHeading(label, colors, size = 11)
+    Text(label, color = colors.ink, fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.SansSerif)
 }
 
 @Composable

@@ -130,7 +130,7 @@ class LearningIntegrationTest {
             store.putAnalysis(oldKey, "sentence", """{"translation_zh":"银行开门了。","clauses":[],"glosses":[]}""")
             var calls = 0
             val engine = AnalysisEngine(content, store, AnalysisTransport { _, system, _, _, _ ->
-                calls++; assertTrue(system.contains("本次仅返回以下模块：translation_zh")); """{"translation_zh":"这家银行营业了。"}"""
+                calls++; assertTrue(system.endsWith(QueryModule.TRANSLATION.instruction)); """{"zh":"这家银行营业了。"}"""
             }, legacyProviders = { listOf(provider) })
             val switched = provider.copy(baseUrl = "https://second.example", model = "new", protocol = ApiProtocol.RESPONSES)
             assertEquals("银行开门了。", engine.cachedSentence(switched, sentence.text)!!.getString("translation_zh"))
@@ -146,17 +146,25 @@ class LearningIntegrationTest {
             val provider = Provider("test", "https://test.example", "test", "fixture")
             val article = Article("partial", "test", "Partial", listOf("Research matters."))
             val token = Content.tokens(article.paragraphs[0]).first()
-            var calls = 0
+            val calls = java.util.concurrent.atomic.AtomicInteger()
+            val ipaCalls = java.util.concurrent.atomic.AtomicInteger()
             val engine = AnalysisEngine(content, store, AnalysisTransport { _, prompt, _, _, _ ->
-                calls++
-                if (calls == 1) """{"context_sense":{"zh":"研究","part_of_speech":"n."},"common_senses":[{"zh":"研究","part_of_speech":"n."}],"derivatives":[]}"""
-                else { assertFalse(prompt.contains("common_senses 数组")); assertFalse(prompt.contains("context_sense 对象"))
-                    """{"phonetics":{"uk":"/rɪˈsɜːtʃ/","us":"/ˈriːsɜːrtʃ/"}}""" }
+                calls.incrementAndGet()
+                when {
+                    prompt.contains("IPA/") -> if (ipaCalls.incrementAndGet() == 1) "{}" else """{"uk":"/rɪˈsɜːtʃ/","us":"/ˈriːsɜːrtʃ/"}"""
+                    prompt.endsWith(QueryModule.IDENTITY.instruction) -> """{"lemma":"research","form":"","part_of_speech":"n."}"""
+                    prompt.endsWith(QueryModule.CONTEXT.instruction) -> """{"zh":"研究"}"""
+                    prompt.endsWith(QueryModule.SENSES.instruction) -> """{"common_senses":[{"zh":"研究","part_of_speech":"n."}]}"""
+                    prompt.endsWith(QueryModule.DERIVATIVES.instruction) -> """{"derivatives":[]}"""
+                    else -> error("Unexpected module")
+                }
             })
             assertTrue(runCatching { engine.word(provider, article, 0, token) {} }.isFailure)
             assertEquals("研究", engine.cachedWord(provider, article.paragraphs[0], token)!!.getJSONObject("context_sense").getString("zh"))
+            val firstCalls = calls.get()
             assertTrue(engine.word(provider, article, 0, token) {}.has("phonetics"))
-            assertEquals(2, calls)
+            assertEquals(firstCalls + 1, calls.get())
+            assertEquals(2, ipaCalls.get())
         } }
     }
     @Test fun failedRegenerationKeepsOldModuleAndQuestionSurvivesReopen(): Unit = runBlocking {

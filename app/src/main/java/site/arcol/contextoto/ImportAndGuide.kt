@@ -94,7 +94,7 @@ internal fun ImportOverlay(vocabulary: Boolean, content: Content, learning: Lear
             if (vocabulary) {
                 UiHeading("DESTINATION", colors, Modifier.padding(top = 20.dp), 12)
                 Text("${if (bankId == null) "●" else "○"} 新建词库", Modifier.fillMaxWidth().clickable { bankId = null }.padding(vertical = 13.dp), color = colors.word, fontSize = 14.sp)
-                content.banks.filter { it.id != "builtin" }.forEach { bank ->
+                content.banks.filter { it.id !in setOf("builtin", "general") }.forEach { bank ->
                     Text("${if (bankId == bank.id) "●" else "○"} 合并到 ${bank.name}", Modifier.fillMaxWidth().clickable { bankId = bank.id; name = bank.name }.padding(vertical = 12.dp), color = colors.ink, fontSize = 14.sp)
                 }
                 Text("词库不会自动进入复习；同词多库保留各自释义。", color = colors.muted, fontSize = 12.sp, lineHeight = 20.sp)
@@ -132,6 +132,7 @@ internal fun ImportOverlay(vocabulary: Boolean, content: Content, learning: Lear
 
 @Composable
 internal fun GuideOverlay(step: Int, content: Content, colors: Palette, top: Dp, onStep: (Int) -> Unit) {
+    BackHandler(true) { } // Includes the interactive practice overlays; only explicit controls leave the guide.
     val titles = listOf("Tap a word", "Hold a sentence", "Follow your place", "Reading ↔ Words")
     val descriptions = listOf("点按英文词查看音标、义项、派生词与本句释义。点磨砂区域收起。", "长按英文词分析所在句；句中仍可点词查看详情。",
         "透明书签包裹当前句子。向下阅读或查询更远位置时，它会平滑跟随；点顶栏书签回到那里。",
@@ -207,7 +208,11 @@ internal fun GuideOverlay(step: Int, content: Content, colors: Palette, top: Dp,
             .put("part_of_speech", if (word in setOf("tap", "hold")) "v." else "n."))).put("derivatives", org.json.JSONArray()) }
         WordSheet(target!!, Article("guide", "guide", titles[step], listOf(titles[step])), content, analysis, null, null,
             colors, screenWidth, screenHeight, top, motion.value, onTitleGeometry = { destinations = listOf(it) }, onRetry = {}, onConfigure = {},
-            heading = "TRY A WORD", allowQueries = false, afterContent = { Text("引导练习 · 不请求模型，不写入学习记录", color = colors.muted, fontSize = 11.sp) })
+            heading = "TRY A WORD", allowQueries = false, afterContent = {
+                Text("引导练习 · 不请求模型，不写入学习记录", color = colors.muted, fontSize = 11.sp)
+                Text("正式查询按模块补缺：音标和本句义等关闭思考；派生词、句子翻译与结构使用 MAX。AI 可能出错，可重新生成对应模块。", color = colors.muted, fontSize = 13.sp, lineHeight = 21.sp, modifier = Modifier.padding(top = 15.dp))
+                Text("先读本地词典与缓存；离线或未配置密钥时仍可阅读，缺少的解析会明确提示。关闭浮层不终止已发请求，可在顶栏查看进度。静默解析默认关闭，启用会消耗额度。", color = colors.muted, fontSize = 13.sp, lineHeight = 21.sp, modifier = Modifier.padding(top = 12.dp))
+            })
     }
     if (lastDemo == "sentence") Column(Modifier.fillMaxWidth().padding(top = top + 44.dp).padding(horizontal = 32.dp)) {
         UiHeading("TRY A SENTENCE", colors, size = 14)
@@ -221,6 +226,7 @@ internal fun GuideOverlay(step: Int, content: Content, colors: Palette, top: Dp,
             Text(if (step == 0) "点按一个单词。" else "长按一个句子。", color = colors.ink, fontFamily = androidx.compose.ui.text.font.FontFamily.Serif,
                 fontSize = 23.sp, modifier = Modifier.padding(top = 12.dp))
             Text("长按英文词即可分析其所在句；点空白收起练习。", color = colors.muted, fontSize = 13.sp, modifier = Modifier.padding(top = 25.dp))
+            Text("正式句子解析来自 AI：翻译、结构与词义各自查询和缓存。模型或网络不可用时保留原文和已有解析，不用失败结果替换旧内容。", color = colors.muted, fontSize = 13.sp, lineHeight = 21.sp, modifier = Modifier.padding(top = 15.dp))
         } }
     }
     }

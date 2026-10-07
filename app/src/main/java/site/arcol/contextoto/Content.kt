@@ -25,6 +25,9 @@ class Content(context: Context) {
         private set
     private var builtinArticles: List<Article> = emptyList()
     private var builtinLexicon: Map<String, Lexeme> = emptyMap()
+    private var generalLexicon: Map<String, Lexeme> = emptyMap()
+    private var wordForms: Map<String, List<String>> = emptyMap()
+    private var knownWords: Set<String> = emptySet()
     private val aliases = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     init {
@@ -43,20 +46,52 @@ class Content(context: Context) {
                 obj.optBoolean("gap", false))
         }
         builtinArticles = articles; builtinLexicon = lexicon
-        banks = listOf(WordBank("builtin", "考纲 4801 · 主背 3000", builtinLexicon))
+        val general = JSONObject(context.assets.open("general_10000.json").bufferedReader().use { it.readText() })
+        val words = general.getJSONObject("words")
+        generalLexicon = words.keys().asSequence().associateWith { word ->
+            val entry = words.getJSONObject(word); val ipa = entry.optString("ipa_uk")
+            Lexeme(word, entry.getString("translation"), null, null, entry.optInt("rank"), false,
+                if (ipa.isBlank()) "" else "/" + ipa.trim('/') + "/")
+        }
+        val forms = general.getJSONObject("forms")
+        wordForms = forms.keys().asSequence().associateWith { surface -> forms.getJSONArray(surface).let { array -> (0 until array.length()).map(array::getString) } }
+        val known = general.getJSONArray("known_words"); knownWords = (0 until known.length()).map(known::getString).toSet()
+        lexicon = generalLexicon + builtinLexicon
+        banks = builtinBanks()
     }
 
     fun refresh(imported: List<Article>, importedBanks: List<WordBank>, savedAliases: Map<String, String>) {
         aliases.putAll(savedAliases)
         articles = builtinArticles + imported
-        banks = listOf(WordBank("builtin", "考纲 4801 · 主背 3000", builtinLexicon)) + importedBanks
-        lexicon = importedBanks.flatMap { it.words.entries }.associate { it.key to it.value } + builtinLexicon
+        banks = builtinBanks() + importedBanks
+        lexicon = generalLexicon + importedBanks.flatMap { it.words.entries }.associate { it.key to it.value } + builtinLexicon
     }
     fun rememberLemma(surface: String, lemma: String) { aliases.putIfAbsent(surface.lowercase(Locale.US), lemma) }
 
     fun lexeme(surface: String): Lexeme? = candidates(surface).firstNotNullOfOrNull { lexicon[it] }
 
     fun lemma(surface: String): String = aliases[surface.lowercase(Locale.US)] ?: lexeme(surface)?.word ?: surface.lowercase(Locale.US)
+
+    private fun builtinBanks() = listOf(WordBank("builtin", "考纲 4801 · 主背 3000", builtinLexicon), WordBank("general", "通用高频 10000 · ECDICT", generalLexicon))
+    fun knownWord(word: String): Boolean = word.lowercase(Locale.US) in knownWords || word in lexicon
+    fun morphologyCandidates(surface: String): List<String> = (wordForms[surface.lowercase(Locale.US)].orEmpty() + candidates(surface).filter { it in lexicon }).distinct()
+    fun localIdentity(surface: String): JSONObject? {
+        val lower = surface.lowercase(Locale.US)
+        val closed = mapOf("the" to "det.", "a" to "det.", "an" to "det.", "and" to "conj.", "or" to "conj.", "of" to "prep.",
+            "in" to "prep.", "on" to "prep.", "by" to "prep.", "with" to "prep.", "from" to "prep.")
+        val possibilities = morphologyCandidates(surface)
+        val roots = possibilities.filter { it != lower }
+        if (roots.size > 1 || (roots.isNotEmpty() && lower in lexicon)) return null
+        val root = roots.singleOrNull() ?: lower
+        val parts = Regex("(?:^|[ /;\\n])((?:n|v|vt|vi|a|adj|adv|prep|pron|det|conj|aux)\\.)")
+            .findAll(lexicon[root]?.translation.orEmpty()).map { normalizedPart(it.groupValues[1]) }.toSet()
+        if (root == lower && parts.size > 1 && lower !in closed) return null
+        if (parts.isEmpty() && lower !in closed) return null
+        return JSONObject().put("lemma", root).put("form", if (root == lower) "" else when {
+            lower.endsWith("'s") || lower.endsWith("’s") -> "所有格"
+            lower.endsWith("ing") -> "现在分词"; lower.endsWith("ed") -> "过去式 / 过去分词"; lower.endsWith("s") -> "复数 / 第三人称单数"; else -> "词形变化"
+        }).put("part_of_speech", closed[lower] ?: parts.singleOrNull().orEmpty())
+    }
 
     private fun candidates(surface: String): List<String> {
         val word = surface.lowercase(Locale.US).trim('’', '\'', '-')
