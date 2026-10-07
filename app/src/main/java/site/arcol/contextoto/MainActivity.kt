@@ -80,6 +80,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.nativeCanvas
@@ -1171,7 +1172,11 @@ private fun ArticleDrawer(
     var footerY by remember { mutableStateOf(0f) }
     Box(modifier) {
         LazyColumn(Modifier.fillMaxSize().drawWithContent {
-            listLayer.record { this@drawWithContent.drawContent() }; drawLayer(listLayer)
+            listLayer.record { this@drawWithContent.drawContent() }
+            // The glass bars draw the blurred recording, not an opaque paper slab.
+            // Hide the sharp copy there so text cannot bleed through its blur.
+            val bottom = if (footerY > 0f) footerY else size.height - footerHeight.toPx()
+            clipRect(top = headerHeight.toPx(), bottom = maxOf(headerHeight.toPx(), bottom)) { drawLayer(listLayer) }
         }, contentPadding = androidx.compose.foundation.layout.PaddingValues(top = headerHeight, bottom = footerHeight)) {
             itemsIndexed(content.articles) { index, article ->
                 val words = remember(epoch, article.id) { store.countLookups(article.id, "word") }
@@ -1193,7 +1198,8 @@ private fun ArticleDrawer(
                 }
             }
         }
-        FrostedBar(listLayer, colors, modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().quietClickable { }) {
+        FrostedBar(listLayer, colors, modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().quietClickable { },
+            opaqueBackdrop = false, tint = 0f) {
         Column(Modifier.onSizeChanged { headerHeight = with(density) { it.height.toDp() } }.padding(top = 30.dp, bottom = 18.dp)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 25.dp), verticalAlignment = Alignment.CenterVertically) {
             UiHeading("ARTICLES", colors)
@@ -1202,7 +1208,7 @@ private fun ArticleDrawer(
         }
         } }
         FrostedBar(listLayer, colors, footerY, Modifier.align(Alignment.BottomCenter).fillMaxWidth().quietClickable { }
-            .onGloballyPositioned { footerY = it.positionInParent().y }) {
+            .onGloballyPositioned { footerY = it.positionInParent().y }, opaqueBackdrop = false, tint = 0f) {
         Column(Modifier.onSizeChanged { footerHeight = with(density) { it.height.toDp() } }.navigationBarsPadding().padding(bottom = 10.dp)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 25.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
             JumpLink("导入文章", colors, onClick = onImport)

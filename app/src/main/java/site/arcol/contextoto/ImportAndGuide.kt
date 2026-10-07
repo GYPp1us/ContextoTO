@@ -27,10 +27,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.TextLayoutResult
 import org.json.JSONObject
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.Dispatchers
@@ -130,33 +126,57 @@ internal fun ImportOverlay(vocabulary: Boolean, content: Content, learning: Lear
     }
 }
 
+internal enum class GuideDismissTarget { WORD, SENTENCE, NONE }
+internal fun guideDismissTarget(wordOpen: Boolean, sentenceOpen: Boolean): GuideDismissTarget = when {
+    wordOpen -> GuideDismissTarget.WORD
+    sentenceOpen -> GuideDismissTarget.SENTENCE
+    else -> GuideDismissTarget.NONE
+}
+
 @Composable
 internal fun GuideOverlay(step: Int, content: Content, colors: Palette, top: Dp, onStep: (Int) -> Unit) {
-    BackHandler(true) { } // Includes the interactive practice overlays; only explicit controls leave the guide.
     val titles = listOf("Tap a word", "Hold a sentence", "Follow your place", "Reading ↔ Words")
     val descriptions = listOf("点按英文词查看音标、义项、派生词与本句释义。点磨砂区域收起。", "长按英文词分析所在句；句中仍可点词查看详情。",
         "透明书签包裹当前句子。向下阅读或查询更远位置时，它会平滑跟随；点顶栏书签回到那里。",
         "空间顺序：文章目录｜文章｜生词｜生词菜单。相邻互滑；列表点词看详情，长按词可记住、忘记或归档。")
-    var demo by remember(step) { mutableStateOf<String?>(null) }
-    var lastDemo by remember(step) { mutableStateOf<String?>(null) }
-    var target by remember(step) { mutableStateOf<WordTarget?>(null) }
-    var sources by remember(step) { mutableStateOf(emptyList<TokenGlyph>()) }
-    var destinations by remember(step) { mutableStateOf(emptyList<TokenGlyph>()) }
-    var sentenceLayout by remember(step) { mutableStateOf<TextLayoutResult?>(null) }
-    val motion = remember(step) { Animatable(0f) }
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    val blur by animateFloatAsState(if (demo != null) GLASS_BLUR else 0f, tween(260))
-    LaunchedEffect(demo) {
-        if (demo != null) {
-            lastDemo = demo
-            motion.snapTo(0f); snapshotFlow { destinations }.first { it.isNotEmpty() }; motion.animateTo(1f, tween(420))
-        } else motion.animateTo(0f, tween(310))
+    var sentenceOpen by remember(step) { mutableStateOf(false) }
+    var sentenceSources by remember(step) { mutableStateOf(emptyList<TokenGlyph>()) }
+    var sentenceDestinations by remember(step) { mutableStateOf(emptyList<TokenGlyph>()) }
+    var wordTarget by remember(step) { mutableStateOf<WordTarget?>(null) }
+    var lastWord by remember(step) { mutableStateOf<WordTarget?>(null) }
+    var wordDestination by remember(step) { mutableStateOf<TokenGlyph?>(null) }
+    val sentenceMotion = remember(step) { Animatable(0f) }
+    val wordMotion = remember(step) { Animatable(0f) }
+    BackHandler(true) {
+        when (guideDismissTarget(wordTarget != null, sentenceOpen)) {
+            GuideDismissTarget.WORD -> wordTarget = null
+            GuideDismissTarget.SENTENCE -> sentenceOpen = false
+            GuideDismissTarget.NONE -> Unit // The guide itself still requires its explicit exit controls.
+        }
+    }
+    val blur by animateFloatAsState(if (sentenceOpen || wordTarget != null) GLASS_BLUR else 0f, tween(260))
+    val sentenceBlur by animateFloatAsState(if (wordTarget?.inSentence == true) GLASS_BLUR else 0f, tween(260))
+    LaunchedEffect(sentenceOpen) {
+        if (sentenceOpen) {
+            sentenceMotion.snapTo(0f)
+            snapshotFlow { sentenceDestinations }.first { it.isNotEmpty() }
+            sentenceMotion.animateTo(1f, tween(420))
+        } else sentenceMotion.animateTo(0f, tween(310))
+    }
+    LaunchedEffect(wordTarget) {
+        if (wordTarget != null) {
+            lastWord = wordTarget; wordMotion.snapTo(0f)
+            snapshotFlow { wordDestination }.first { it != null }
+            wordMotion.animateTo(1f, tween(420))
+        } else wordMotion.animateTo(0f, tween(310))
     }
     GlassScrim(colors) { }
     BoxWithConstraints(Modifier.fillMaxSize()) {
     val screenWidth = maxWidth; val screenHeight = maxHeight
+    val displayedWord = wordTarget ?: lastWord.takeIf { wordMotion.value > .001f }
+    val sentenceVisible = sentenceOpen || sentenceMotion.value > .001f
     Column(Modifier.fillMaxSize().graphicsLayer { renderEffect = if (blur > .1f) BlurEffect(blur, blur, TileMode.Clamp) else null }
-        .padding(top = top + 40.dp).navigationBarsPadding().padding(horizontal = 30.dp),
+        .padding(top = top + 40.dp).navigationBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 30.dp),
         verticalArrangement = Arrangement.Center) {
         RevealElement(0, step) {
             Canvas(Modifier.fillMaxWidth().height(140.dp)) {
@@ -186,50 +206,61 @@ internal fun GuideOverlay(step: Int, content: Content, colors: Palette, top: Dp,
             if (step < 2) Box(Modifier.fillMaxWidth().padding(top = 28.dp), contentAlignment = Alignment.Center) {
                 InteractiveParagraph(titles[step], colors, null, content, emptySet(), ReaderScale(34f, 1.25f, 0f, 0f),
                     Modifier.width(IntrinsicSize.Max), onWord = { token, anchor ->
-                        target = WordTarget(0, token, anchor, false); sources = listOf(anchor); destinations = emptyList(); demo = "word"
-                    }, onLongWord = { _, glyphs -> sources = glyphs; destinations = emptyList(); demo = "sentence" },
-                    hidden = if (destinations.isNotEmpty() && (demo != null || motion.value > .001f))
-                        if (sources.size > 1) 0 to titles[step].length else target?.token?.let { it.start to it.end } else null)
+                        wordDestination = null; wordTarget = WordTarget(0, token, anchor, false)
+                    }, onLongWord = { _, glyphs ->
+                        sentenceSources = glyphs; sentenceDestinations = emptyList(); sentenceOpen = true
+                    }, hidden = when {
+                        sentenceVisible && sentenceDestinations.isNotEmpty() -> 0 to titles[step].length
+                        displayedWord?.inSentence == false && wordDestination != null -> displayedWord.token.start to displayedWord.token.end
+                        else -> null
+                    })
             } else UiHeading(if (step == 2) "FOLLOW YOUR PLACE" else "FOUR PANELS", colors, size = 28)
         }
         RevealElement(2, step) { Text(descriptions[step], color = colors.muted, fontSize = 15.sp, lineHeight = 25.sp, modifier = Modifier.padding(top = 18.dp)) }
-        RevealElement(3, step) { Row(Modifier.fillMaxWidth().padding(top = 36.dp), verticalAlignment = Alignment.CenterVertically) {
+        RevealElement(3, step) {
+            Text("解析由 AI 生成，可能有误。服务不可用时，仍可查看原文、词典和已有解析。引导使用本地示例。",
+                color = colors.muted, fontSize = 13.sp, lineHeight = 21.sp, modifier = Modifier.padding(top = 18.dp))
+        }
+        RevealElement(4, step) { Row(Modifier.fillMaxWidth().padding(top = 24.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("${step + 1} / 4", color = colors.muted, fontFamily = ReadingFont, fontSize = 14.sp, modifier = Modifier.weight(1f))
             Text("跳过", Modifier.clickable { onStep(4) }.padding(12.dp), color = colors.muted, fontSize = 13.sp)
             JumpLink(if (step == 3) "开始" else "下一步", colors, Modifier.padding(12.dp)) { onStep(step + 1) }
         } }
     }
-    if (demo != null || motion.value > .001f) GlassScrim(colors, motion.value) { demo = null }
-    AnimatedVisibility(demo != null, enter = fadeIn(tween(160)), exit = fadeOut(tween(310))) {
-    if (lastDemo == "word" && target != null) {
-        val word = target!!.token.text.lowercase()
+    if (sentenceVisible) GlassScrim(colors, sentenceMotion.value) { sentenceOpen = false }
+    AnimatedVisibility(sentenceOpen, enter = fadeIn(tween(160)), exit = fadeOut(tween(310))) {
+        Column(Modifier.fillMaxWidth().heightIn(max = (screenHeight - top - 20.dp).coerceAtLeast(160.dp)).graphicsLayer {
+            renderEffect = if (sentenceBlur > .1f) BlurEffect(sentenceBlur, sentenceBlur, TileMode.Clamp) else null
+        }.padding(top = top + 44.dp).navigationBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 32.dp)) {
+            UiHeading("TRY A SENTENCE", colors, size = 14)
+            InteractiveParagraph(titles[step], colors, null, content, emptySet(), ReaderScale(34f, 1.25f, 0f, 0f),
+                Modifier.fillMaxWidth().padding(top = 22.dp).graphicsLayer { alpha = if (sentenceMotion.value >= 1f) 1f else 0f },
+                onWord = { token, anchor ->
+                    wordDestination = null; wordTarget = WordTarget(0, token, anchor, true)
+                }, onLongWord = { _, _ -> }, onGeometry = { sentenceDestinations = it },
+                hidden = displayedWord?.takeIf { it.inSentence && wordDestination != null }?.token?.let { it.start to it.end })
+            RevealElement(1, step) { Column(Modifier.padding(top = 28.dp)) {
+                UiHeading("TRANSLATION", colors, size = 12)
+                Text(if (step == 0) "点按一个单词。" else "长按一个句子。", color = colors.ink,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Serif, fontSize = 23.sp, modifier = Modifier.padding(top = 12.dp))
+            } }
+        }
+    }
+    if (sentenceVisible && sentenceSources.isNotEmpty() && sentenceDestinations.isNotEmpty())
+        MotionGlyphs(sentenceSources, sentenceDestinations, sentenceMotion.value, sentenceOpen)
+    if (wordTarget != null || wordMotion.value > .001f) GlassScrim(colors, wordMotion.value) { wordTarget = null }
+    AnimatedVisibility(wordTarget != null, enter = fadeIn(tween(160)), exit = fadeOut(tween(310))) {
+    if (displayedWord != null) {
+        val word = displayedWord.token.text.lowercase()
         val meaning = when (word) { "tap" -> "轻点"; "hold" -> "按住"; "a" -> "一个"; "sentence" -> "句子"; else -> "单词" }
         val analysis = remember(step, word) { JSONObject().put("common_senses", org.json.JSONArray().put(JSONObject().put("zh", meaning)
             .put("part_of_speech", if (word in setOf("tap", "hold")) "v." else "n."))).put("derivatives", org.json.JSONArray()) }
-        WordSheet(target!!, Article("guide", "guide", titles[step], listOf(titles[step])), content, analysis, null, null,
-            colors, screenWidth, screenHeight, top, motion.value, onTitleGeometry = { destinations = listOf(it) }, onRetry = {}, onConfigure = {},
-            heading = "TRY A WORD", allowQueries = false, afterContent = {
-                Text("引导练习 · 不请求模型，不写入学习记录", color = colors.muted, fontSize = 11.sp)
-                Text("正式查询按模块补缺：音标和本句义等关闭思考；派生词、句子翻译与结构使用 MAX。AI 可能出错，可重新生成对应模块。", color = colors.muted, fontSize = 13.sp, lineHeight = 21.sp, modifier = Modifier.padding(top = 15.dp))
-                Text("先读本地词典与缓存；离线或未配置密钥时仍可阅读，缺少的解析会明确提示。关闭浮层不终止已发请求，可在顶栏查看进度。静默解析默认关闭，启用会消耗额度。", color = colors.muted, fontSize = 13.sp, lineHeight = 21.sp, modifier = Modifier.padding(top = 12.dp))
-            })
-    }
-    if (lastDemo == "sentence") Column(Modifier.fillMaxWidth().padding(top = top + 44.dp).padding(horizontal = 32.dp)) {
-        UiHeading("TRY A SENTENCE", colors, size = 14)
-        Text(titles[step], Modifier.padding(top = 22.dp).graphicsLayer { alpha = if (motion.value >= 1f) 1f else 0f }
-            .onGloballyPositioned { coordinates -> sentenceLayout?.let { layout ->
-                destinations = Content.tokens(titles[step]).map { token -> measuredGlyph(token, AnnotatedString(titles[step]), layout,
-                    coordinates.positionInRoot(), with(density) { 34.sp.toPx() }, 34f, colors.ink) }
-            } }, onTextLayout = { sentenceLayout = it }, fontFamily = ReadingFont, fontSize = 34.sp, color = colors.ink)
-        RevealElement(1, step) { Column(Modifier.padding(top = 28.dp)) {
-            UiHeading("TRANSLATION", colors, size = 12)
-            Text(if (step == 0) "点按一个单词。" else "长按一个句子。", color = colors.ink, fontFamily = androidx.compose.ui.text.font.FontFamily.Serif,
-                fontSize = 23.sp, modifier = Modifier.padding(top = 12.dp))
-            Text("长按英文词即可分析其所在句；点空白收起练习。", color = colors.muted, fontSize = 13.sp, modifier = Modifier.padding(top = 25.dp))
-            Text("正式句子解析来自 AI：翻译、结构与词义各自查询和缓存。模型或网络不可用时保留原文和已有解析，不用失败结果替换旧内容。", color = colors.muted, fontSize = 13.sp, lineHeight = 21.sp, modifier = Modifier.padding(top = 15.dp))
-        } }
+        WordSheet(displayedWord, Article("guide", "guide", titles[step], listOf(titles[step])), content, analysis, null, null,
+            colors, screenWidth, screenHeight, top, wordMotion.value, onTitleGeometry = { wordDestination = it },
+            onRetry = {}, onConfigure = {}, heading = "TRY A WORD", allowQueries = false)
     }
     }
-    if (sources.isNotEmpty() && destinations.isNotEmpty()) MotionGlyphs(sources, destinations, motion.value, demo != null)
+    if (displayedWord != null && wordDestination != null)
+        MotionGlyphs(listOf(displayedWord.anchor), listOf(wordDestination!!), wordMotion.value, wordTarget != null)
     }
 }

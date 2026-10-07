@@ -3,8 +3,23 @@ package site.arcol.contextoto
 import java.util.Locale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
+
+/** UI labels keep their uppercase wording; each word's initial stays full-height. */
+internal fun uiSmallCaps(text: String, fullSize: Float): AnnotatedString = buildAnnotatedString {
+    val upper = text.uppercase(Locale.US)
+    append(upper)
+    upper.forEachIndexed { index, char ->
+        val previous = if (index > 0) upper[index - 1] else ' '
+        if (char in 'A'..'Z' && (previous.isLetter() || previous == '\'' || previous == '’')) {
+            addStyle(SpanStyle(fontSize = (fullSize * .78f).sp), index, index + 1)
+        }
+    }
+}
 
 internal fun resolveGlyphWeight(text: AnnotatedString, offset: Int): FontWeight =
     text.spanStyles.lastOrNull { offset in it.start until it.end && it.item.fontWeight != null }?.item?.fontWeight ?: FontWeight.Normal

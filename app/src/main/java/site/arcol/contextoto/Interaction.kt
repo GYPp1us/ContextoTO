@@ -46,14 +46,16 @@ internal fun Modifier.quietClickable(enabled: Boolean = true, onClick: () -> Uni
 
 @Composable
 internal fun FrostedBar(source: GraphicsLayer, colors: Palette, offsetY: Float = 0f,
-                        modifier: Modifier = Modifier, content: @Composable BoxScope.() -> Unit) {
+                        modifier: Modifier = Modifier, opaqueBackdrop: Boolean = true,
+                        tint: Float = GLASS_TINT, content: @Composable BoxScope.() -> Unit) {
     Box(modifier.clipToBounds()) {
         // Reproduce the blurred backdrop over paper before tinting. A transparent
         // recording alone would let the original, sharp text bleed through it.
-        Canvas(Modifier.matchParentSize().background(colors.paper).graphicsLayer { renderEffect = BlurEffect(GLASS_BLUR, GLASS_BLUR, TileMode.Clamp) }) {
+        Canvas(Modifier.matchParentSize().then(if (opaqueBackdrop) Modifier.background(colors.paper) else Modifier)
+            .graphicsLayer { renderEffect = BlurEffect(GLASS_BLUR, GLASS_BLUR, TileMode.Clamp) }) {
             translate(top = -offsetY) { drawLayer(source) }
         }
-        Box(Modifier.matchParentSize().background(colors.paper.copy(alpha = GLASS_TINT)))
+        if (tint > 0f) Box(Modifier.matchParentSize().background(colors.paper.copy(alpha = tint)))
         content()
     }
 }
@@ -101,7 +103,7 @@ internal fun uiTitle(text: String): String = when (text) {
 
 @Composable
 internal fun UiHeading(title: String, colors: Palette, modifier: Modifier = Modifier, size: Int = 25) {
-    Text(uiTitle(title), modifier, color = colors.ink, fontFamily = ReadingFont,
+    Text(uiSmallCaps(uiTitle(title), size.toFloat()), modifier, color = colors.ink, fontFamily = ReadingFont,
         fontWeight = FontWeight.Bold, fontSize = size.sp, letterSpacing = .6.sp)
 }
 

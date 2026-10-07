@@ -195,7 +195,7 @@ class SecureSettings(private val context: Context) {
         get() = prefs.getBoolean("silent_inference", false)
         set(value) { prefs.edit().putBoolean("silent_inference", value).apply() }
     var customStatusBar: Boolean
-        get() = prefs.getBoolean("custom_status_bar", false)
+        get() = prefs.getBoolean("custom_status_bar", true)
         set(value) { prefs.edit().putBoolean("custom_status_bar", value).apply() }
     var bookmarkVisible: Boolean
         get() = prefs.getBoolean("bookmark_visible", true)

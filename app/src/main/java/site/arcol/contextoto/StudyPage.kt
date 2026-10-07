@@ -314,7 +314,7 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                     val amount = ((menuFraction - i * .08f) / (1f - i * .08f)).coerceIn(0f, 1f)
                     alpha = amount; translationY = -8.dp.toPx() * (1f - amount)
                 }) {
-                    Text(uiTitle(item), Modifier.fillMaxWidth().quietClickable {
+                    Text(uiSmallCaps(uiTitle(item), 23f), Modifier.fillMaxWidth().quietClickable {
                         if (mode == item) onMenu(false) else onSwitchMode { mode = item }
                     }.padding(vertical = 12.dp),
                         color = if (mode == item) colors.word else colors.ink, fontSize = 23.sp, fontFamily = ReadingFont, fontWeight = FontWeight.Bold)
