@@ -20,7 +20,12 @@ for table in tables:
         continue
     original = before.execute('SELECT * FROM "' + table + '"').fetchall()
     current = after.execute('SELECT * FROM "' + table + '"').fetchall()
-    assert set(original) == set(current), f"Private-state rows changed: {table}"
+    # The existing idempotent schema migration backfills identity aliases from
+    # legacy lookup events. It may add mappings, but must retain every old one.
+    if table == "word_alias":
+        assert set(original) <= set(current), "An existing alias was changed or lost"
+    else:
+        assert set(original) == set(current), f"Private-state rows changed: {table}"
     counts[table] = len(original)
 
 def supplemented(old, new):
