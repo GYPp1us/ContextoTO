@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -75,14 +76,31 @@ internal fun ImportOverlay(vocabulary: Boolean, content: Content, learning: Lear
     LaunchedEffect(Unit) { launcher.launch(arrayOf("text/*", "application/zip", "application/octet-stream")) }
     BackHandler(!saving) { onClose() }
     GlassScrim(colors) { if (!saving) onClose() }
-    Column(Modifier.fillMaxSize().padding(top = top + 28.dp).navigationBarsPadding().verticalScroll(rememberScrollState())
-        .padding(horizontal = 28.dp, vertical = 20.dp)) {
+    val plan = preview
+    val split = LocalReaderViewport.current.split
+    val actions: @Composable () -> Unit = {
+        if (plan != null && result == null && !saving) {
+            JumpLink(if (plan.warnings.isEmpty()) "确认导入" else "确认有效内容并跳过异常", colors,
+                Modifier.fillMaxWidth().padding(vertical = 20.dp), size = 17) {
+                saving = true
+                scope.launch {
+                    try {
+                        val counts = withContext(Dispatchers.IO) { learning.commitImport(plan, name, bankId) }
+                        result = "已导入 ${counts.first} 篇文章、${counts.second} 个词元；原有内容和学习记录已保留。"
+                    } catch (failure: Exception) { error = failure.message ?: "保存失败，未提交内容" }
+                    finally { saving = false }
+                }
+            }
+        }
+        if (!saving) JumpLink(if (result == null) "取消" else "完成", colors, Modifier.padding(vertical = 20.dp), onClick = onClose)
+    }
+    DetailColumns(Modifier.fillMaxSize().padding(top = top + 16.dp).navigationBarsPadding().imePadding()
+        .padding(horizontal = 28.dp, vertical = 12.dp), leading = {
         RevealElement(0, vocabulary) { UiHeading(if (vocabulary) "IMPORT WORDS" else "IMPORT READING", colors, size = 34) }
         Spacer(Modifier.height(25.dp))
         if (parsing || saving) ProgressBlock(null, colors, if (saving) "正在保存" else "本地解析 · 不调用模型")
         error?.let { Text(it, color = colors.paragraph, fontSize = 15.sp, modifier = Modifier.padding(vertical = 18.dp)) }
         result?.let { Text(it, color = colors.word, fontSize = 18.sp, modifier = Modifier.padding(vertical = 18.dp)) }
-        val plan = preview
         if (plan != null && result == null && !saving) {
             RevealElement(1, plan) { Text(if (vocabulary) "${plan.words.map { it.word }.distinct().size} 个词元" else "${plan.articles.size} 篇文章",
                 color = colors.word, fontSize = 15.sp) }
@@ -95,6 +113,10 @@ internal fun ImportOverlay(vocabulary: Boolean, content: Content, learning: Lear
                 }
                 Text("词库不会自动进入复习；同词多库保留各自释义。", color = colors.muted, fontSize = 12.sp, lineHeight = 20.sp)
             }
+        }
+        if (split) actions()
+    }, trailing = {
+        if (plan != null && result == null && !saving) {
             plan.articles.forEachIndexed { i, article -> RevealElement(i + 2, article.id) {
                 Column(Modifier.padding(top = 22.dp)) {
                     Text(article.title, color = colors.ink, fontFamily = ReadingFont, fontSize = 23.sp)
@@ -110,20 +132,9 @@ internal fun ImportOverlay(vocabulary: Boolean, content: Content, learning: Lear
             } }
             if (plan.words.size > 8) Text("另有 ${plan.words.size - 8} 个词", color = colors.muted, fontSize = 12.sp)
             plan.warnings.forEach { warning -> Text(warning, color = colors.paragraph, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp)) }
-            JumpLink(if (plan.warnings.isEmpty()) "确认导入" else "确认有效内容并跳过异常", colors,
-                Modifier.fillMaxWidth().padding(vertical = 28.dp), size = 17, enabled = !saving) {
-                    saving = true
-                    scope.launch {
-                        try {
-                            val counts = withContext(Dispatchers.IO) { learning.commitImport(plan, name, bankId) }
-                            result = "已导入 ${counts.first} 篇文章、${counts.second} 个词元；原有内容和学习记录已保留。"
-                        } catch (failure: Exception) { error = failure.message ?: "保存失败，未提交内容" }
-                        finally { saving = false }
-                    }
-                }
         }
-        if (!saving) JumpLink(if (result == null) "取消" else "完成", colors, Modifier.padding(vertical = 20.dp), onClick = onClose)
-    }
+        if (!split) actions()
+    })
 }
 
 internal enum class GuideDismissTarget { WORD, SENTENCE, NONE }
@@ -141,6 +152,7 @@ internal fun GuideOverlay(step: Int, content: Content, colors: Palette, top: Dp,
         "空间顺序：文章目录｜文章｜生词｜生词菜单。相邻互滑；列表点词看详情，长按词可记住、忘记或归档。")
     var sentenceOpen by remember(step) { mutableStateOf(false) }
     var sentenceSources by remember(step) { mutableStateOf(emptyList<TokenGlyph>()) }
+    var guideSources by remember(step) { mutableStateOf(emptyList<TokenGlyph>()) }
     var sentenceDestinations by remember(step) { mutableStateOf(emptyList<TokenGlyph>()) }
     var wordTarget by remember(step) { mutableStateOf<WordTarget?>(null) }
     var lastWord by remember(step) { mutableStateOf<WordTarget?>(null) }
@@ -173,11 +185,15 @@ internal fun GuideOverlay(step: Int, content: Content, colors: Palette, top: Dp,
     GlassScrim(colors) { }
     BoxWithConstraints(Modifier.fillMaxSize()) {
     val screenWidth = maxWidth; val screenHeight = maxHeight
+    val viewport = LocalReaderViewport.current
+    LaunchedEffect(screenWidth, screenHeight) {
+        if (wordTarget != null) wordMotion.snapTo(1f)
+        if (sentenceOpen) sentenceMotion.snapTo(1f)
+    }
     val displayedWord = wordTarget ?: lastWord.takeIf { wordMotion.value > .001f }
     val sentenceVisible = sentenceOpen || sentenceMotion.value > .001f
-    Column(Modifier.fillMaxSize().graphicsLayer { renderEffect = if (blur > .1f) BlurEffect(blur, blur, TileMode.Clamp) else null }
-        .padding(top = top + 40.dp).navigationBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 30.dp),
-        verticalArrangement = Arrangement.Center) {
+    DetailColumns(Modifier.fillMaxSize().graphicsLayer { renderEffect = if (blur > .1f) BlurEffect(blur, blur, TileMode.Clamp) else null }
+        .padding(top = top + if (viewport.compact) 8.dp else 40.dp).navigationBarsPadding().padding(horizontal = 30.dp), leading = {
         RevealElement(0, step) {
             Canvas(Modifier.fillMaxWidth().height(140.dp)) {
                 val center = Offset(size.width / 2, size.height / 2)
@@ -205,17 +221,18 @@ internal fun GuideOverlay(step: Int, content: Content, colors: Palette, top: Dp,
         RevealElement(1, step) {
             if (step < 2) Box(Modifier.fillMaxWidth().padding(top = 28.dp), contentAlignment = Alignment.Center) {
                 InteractiveParagraph(titles[step], colors, null, content, emptySet(), ReaderScale(34f, 1.25f, 0f, 0f),
-                    Modifier.width(IntrinsicSize.Max), onWord = { token, anchor ->
+                    Modifier.width(IntrinsicSize.Max).testTag("guide-example"), onWord = { token, anchor ->
                         wordDestination = null; wordTarget = WordTarget(0, token, anchor, false)
                     }, onLongWord = { _, glyphs ->
                         sentenceSources = glyphs; sentenceDestinations = emptyList(); sentenceOpen = true
-                    }, hidden = when {
+                    }, onGeometry = { guideSources = it }, hidden = when {
                         sentenceVisible && sentenceDestinations.isNotEmpty() -> 0 to titles[step].length
                         displayedWord?.inSentence == false && wordDestination != null -> displayedWord.token.start to displayedWord.token.end
                         else -> null
                     })
             } else UiHeading(if (step == 2) "FOLLOW YOUR PLACE" else "FOUR PANELS", colors, size = 28)
         }
+    }, trailing = {
         RevealElement(2, step) { Text(descriptions[step], color = colors.muted, fontSize = 15.sp, lineHeight = 25.sp, modifier = Modifier.padding(top = 18.dp)) }
         RevealElement(3, step) {
             Text("解析由 AI 生成，可能有误。服务不可用时，仍可查看原文、词典和已有解析。引导使用本地示例。",
@@ -226,15 +243,16 @@ internal fun GuideOverlay(step: Int, content: Content, colors: Palette, top: Dp,
             Text("跳过", Modifier.clickable { onStep(4) }.padding(12.dp), color = colors.muted, fontSize = 13.sp)
             JumpLink(if (step == 3) "开始" else "下一步", colors, Modifier.padding(12.dp)) { onStep(step + 1) }
         } }
-    }
+    })
     if (sentenceVisible) GlassScrim(colors, sentenceMotion.value) { sentenceOpen = false }
     AnimatedVisibility(sentenceOpen, enter = fadeIn(tween(160)), exit = fadeOut(tween(310))) {
-        Column(Modifier.fillMaxWidth().heightIn(max = (screenHeight - top - 20.dp).coerceAtLeast(160.dp)).graphicsLayer {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        Column(Modifier.width(viewport.sheetWidth.dp).heightIn(max = viewport.sheetHeight(top.value).dp).graphicsLayer {
             renderEffect = if (sentenceBlur > .1f) BlurEffect(sentenceBlur, sentenceBlur, TileMode.Clamp) else null
-        }.padding(top = top + 44.dp).navigationBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 32.dp)) {
+        }.padding(top = top + if (viewport.compact) 12.dp else 44.dp).navigationBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 5.dp)) {
             UiHeading("TRY A SENTENCE", colors, size = 14)
             InteractiveParagraph(titles[step], colors, null, content, emptySet(), ReaderScale(34f, 1.25f, 0f, 0f),
-                Modifier.fillMaxWidth().padding(top = 22.dp).graphicsLayer { alpha = if (sentenceMotion.value >= 1f) 1f else 0f },
+                Modifier.fillMaxWidth().padding(top = 22.dp).testTag("guide-sentence-original").graphicsLayer { alpha = if (sentenceMotion.value >= 1f) 1f else 0f },
                 onWord = { token, anchor ->
                     wordDestination = null; wordTarget = WordTarget(0, token, anchor, true)
                 }, onLongWord = { _, _ -> }, onGeometry = { sentenceDestinations = it },
@@ -244,10 +262,10 @@ internal fun GuideOverlay(step: Int, content: Content, colors: Palette, top: Dp,
                 Text(if (step == 0) "点按一个单词。" else "长按一个句子。", color = colors.ink,
                     fontFamily = androidx.compose.ui.text.font.FontFamily.Serif, fontSize = 23.sp, modifier = Modifier.padding(top = 12.dp))
             } }
-        }
+        } }
     }
     if (sentenceVisible && sentenceSources.isNotEmpty() && sentenceDestinations.isNotEmpty())
-        MotionGlyphs(sentenceSources, sentenceDestinations, sentenceMotion.value, sentenceOpen)
+        MotionGlyphs(guideSources.ifEmpty { sentenceSources }, sentenceDestinations, sentenceMotion.value, sentenceOpen)
     if (wordTarget != null || wordMotion.value > .001f) GlassScrim(colors, wordMotion.value) { wordTarget = null }
     AnimatedVisibility(wordTarget != null, enter = fadeIn(tween(160)), exit = fadeOut(tween(310))) {
     if (displayedWord != null) {
@@ -260,7 +278,10 @@ internal fun GuideOverlay(step: Int, content: Content, colors: Palette, top: Dp,
             onRetry = {}, onConfigure = {}, heading = "TRY A WORD", allowQueries = false)
     }
     }
-    if (displayedWord != null && wordDestination != null)
-        MotionGlyphs(listOf(displayedWord.anchor), listOf(wordDestination!!), wordMotion.value, wordTarget != null)
+    if (displayedWord != null && wordDestination != null) {
+        val sources = if (displayedWord.inSentence) sentenceDestinations else guideSources
+        val anchor = sources.firstOrNull { it.token.start == displayedWord.token.start } ?: displayedWord.anchor
+        MotionGlyphs(listOf(anchor), listOf(wordDestination!!), wordMotion.value, wordTarget != null)
+    }
     }
 }

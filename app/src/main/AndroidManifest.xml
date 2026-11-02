@@ -12,6 +12,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout"
             android:screenOrientation="unspecified"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
