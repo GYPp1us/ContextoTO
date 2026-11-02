@@ -204,8 +204,7 @@ private class RetainedSpace(val scroll: ScrollState) {
 private val LocalRetainedSpace = staticCompositionLocalOf<RetainedSpace?> { null }
 
 @Composable
-internal fun RetainedColumn(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
-    val scroll = rememberScrollState()
+internal fun RetainedColumn(modifier: Modifier = Modifier, scroll: ScrollState = rememberScrollState(), content: @Composable ColumnScope.() -> Unit) {
     val retained = remember(scroll) { RetainedSpace(scroll) }
     CompositionLocalProvider(LocalRetainedSpace provides retained) {
         Box(modifier.onSizeChanged { retained.viewport = it.height }) {

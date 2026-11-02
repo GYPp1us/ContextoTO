@@ -6,6 +6,10 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -22,6 +26,7 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -44,6 +49,8 @@ internal fun SettingsSheet(
 ) {
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
+    val viewport = LocalReaderViewport.current
+    val categories = remember { List(5) { BringIntoViewRequester() } }
     var footerHeight by remember { mutableStateOf(112.dp) }
     val names = remember { listOf("DeepSeek 官方", "Command Code GOAT", "自定义") }
     var selected by remember { mutableStateOf(current.name) }
@@ -103,15 +110,30 @@ internal fun SettingsSheet(
         if (focusExpanded && focusUrlInput.isNotBlank() && focusCatalog == null) loadFocusCatalog()
     }
     Box(modifier.imePadding()) {
-        RetainedColumn(Modifier.fillMaxSize().clipToBounds().drawWithContent {
+        Row(Modifier.fillMaxSize().drawWithContent {
             settingsLayer.record { this@drawWithContent.drawContent() }; drawLayer(settingsLayer)
+        }) {
+        if (viewport.split) Column(Modifier.width(190.dp).fillMaxHeight().padding(start = 26.dp, end = 20.dp, top = 16.dp,
+            bottom = footerHeight).verticalScroll(rememberScrollState())) {
+            JumpLink("返回阅读", colors, onClick = onBack)
+            UiHeading("SETTINGS", colors, Modifier.padding(top = 6.dp, bottom = 4.dp), 25)
+            Text(BuildConfig.VERSION_NAME, color = colors.muted, fontSize = 11.sp)
+            listOf("Reading", "Learning", "Connections", "Data", "About").forEachIndexed { index, title ->
+                Text(uiSmallCaps(uiTitle(title), 16f), Modifier.fillMaxWidth().testTag("settings-nav-$index").quietClickable {
+                    scope.launch { categories[index].bringIntoView() }
+                }.padding(vertical = 10.dp), color = colors.word, fontFamily = ReadingFont, fontSize = 16.sp,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+            }
         }
-            .padding(horizontal = 26.dp).padding(top = 24.dp, bottom = 24.dp)) {
+        RetainedColumn(Modifier.weight(1f).fillMaxHeight().clipToBounds().testTag("settings-form")
+            .padding(horizontal = 26.dp).padding(top = if (viewport.compact) 6.dp else 24.dp, bottom = footerHeight + 12.dp)) {
+            if (!viewport.split) {
             JumpLink("返回阅读", colors, onClick = onBack)
             Text(BuildConfig.VERSION_NAME, color = colors.muted, fontSize = 11.sp)
             Spacer(Modifier.height(12.dp))
             UiHeading("SETTINGS", colors, size = 30)
-            SettingsCategory("Reading", colors)
+            }
+            SettingsCategory("Reading", colors, Modifier.bringIntoViewRequester(categories[0]))
             SwitchSetting("深色主题", "低饱和度的明暗阅读界面", dark, colors, onDark)
             SwitchSetting("沉浸状态栏", "篇名、时间、进度和专注状态；保留挖孔安全区", customStatusBar, colors, onCustomStatusBar)
             SwitchSetting("跟随书签", "沿句子轮廓包裹，随阅读与最远查询位置推进", bookmarkVisible, colors, onBookmarkVisible)
@@ -135,7 +157,7 @@ internal fun SettingsSheet(
                     }
                 }
             }
-            SettingsCategory("Learning", colors)
+            SettingsCategory("Learning", colors, Modifier.bringIntoViewRequester(categories[1]))
             SwitchSetting("已查询单词加粗", "保留正文及从句的原有颜色；默认关闭", markQueriedWords, colors, onMarkQueriedWords)
             SwitchSetting("静默推理", "后台逐句分析，会消耗所选模型额度；默认关闭", silentInference, colors, onSilentInference)
             SettingsFoldout("复习与导入", "每次加入 $importCountInput 词 · 每日 ${if (reviewLimitInput == "0") "不限" else reviewLimitInput + " 词"}",
@@ -149,7 +171,7 @@ internal fun SettingsSheet(
                         fontSize = 11.sp, lineHeight = 18.sp)
                 }
             }
-            SettingsCategory("Connections", colors)
+            SettingsCategory("Connections", colors, Modifier.bringIntoViewRequester(categories[2]))
             SettingsFoldout("模型与连接", "$selected · ${models[selected].orEmpty().ifBlank { "选择模型" }}",
                 modelExpanded, colors, { modelExpanded = !modelExpanded }) {
                 RevealElement(0, "model-services") {
@@ -225,25 +247,29 @@ internal fun SettingsSheet(
                     }
                 }
             }
-            SettingsCategory("Data", colors)
+            SettingsCategory("Data", colors, Modifier.bringIntoViewRequester(categories[3]))
             SettingAction("文章与解析 · ZIP 导入导出", colors, action = onArchive)
             Text("仅文章和解析；不包含学习记录、书签、密钥或配置。", color = colors.muted, fontSize = 11.sp, lineHeight = 18.sp)
-            SettingsCategory("About", colors)
+            SettingsCategory("About", colors, Modifier.bringIntoViewRequester(categories[4]))
             SettingAction(if (updateChecking) "正在检查…" else "检查更新", colors, !updateChecking, onCheckUpdate)
             Text(updateStatus, Modifier.fillMaxWidth().clickable(enabled = updateInfo?.available == true,
                 onClick = onDownloadUpdate).padding(vertical = 12.dp), color = if (updateInfo?.available == true) colors.word else colors.muted,
                 fontSize = 12.sp, lineHeight = 18.sp)
-            Spacer(Modifier.height(footerHeight + 24.dp))
+            Spacer(Modifier.height(24.dp))
         }
-        FrostedBar(settingsLayer, colors, footerY, Modifier.align(Alignment.BottomCenter).fillMaxWidth().onGloballyPositioned {
+        }
+        FrostedBar(settingsLayer, colors, footerY, Modifier.align(Alignment.BottomCenter).fillMaxWidth().quietClickable { }.onGloballyPositioned {
             footerY = it.positionInParent().y
         }) {
-        Column(Modifier.fillMaxWidth().onSizeChanged {
+        AdaptiveFooter(Modifier.fillMaxWidth().onSizeChanged {
             footerHeight = with(density) { it.height.toDp() }
-        }.padding(horizontal = 26.dp, vertical = 18.dp)) {
+        }.padding(horizontal = 26.dp, vertical = if (viewport.compact) 6.dp else 18.dp), leading = {
+            Column {
             saveError?.let { Text(it, color = colors.paragraph, fontSize = 11.sp, modifier = Modifier.padding(bottom = 8.dp)) }
             UiHeading("SAVE CHANGES", colors, size = 12)
-            JumpLink("保存并返回", colors, Modifier.fillMaxWidth(), size = 18, bold = true) {
+            }
+        }, action = {
+            JumpLink("保存并返回", colors, if (viewport.compact) Modifier else Modifier.fillMaxWidth(), size = 18, bold = true) {
                 if (importCountInput.toIntOrNull() !in 1..500 || reviewLimitInput.toIntOrNull() !in 0..2000) {
                     saveError = "加入数量须为 1–500，每日复习须为 0–2000"; reviewExpanded = true; return@JumpLink
                 }
@@ -268,14 +294,14 @@ internal fun SettingsSheet(
                 settings.focusItemId = if (focusUrlInput.isBlank()) 0 else focusItemId
                 keys.clear(); onSave()
             }
-        }
+        })
         }
     }
 }
 
 @Composable
-private fun SettingsCategory(english: String, colors: Palette) {
-    Row(Modifier.fillMaxWidth().padding(top = 32.dp, bottom = 16.dp), verticalAlignment = Alignment.Bottom) {
+private fun SettingsCategory(english: String, colors: Palette, modifier: Modifier = Modifier) {
+    Row(modifier.fillMaxWidth().padding(top = if (LocalReaderViewport.current.compact) 16.dp else 32.dp, bottom = 16.dp), verticalAlignment = Alignment.Bottom) {
         UiHeading(english, colors, size = 28)
     }
 }
