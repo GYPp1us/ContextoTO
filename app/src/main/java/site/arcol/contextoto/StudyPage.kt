@@ -204,7 +204,7 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
         }) {
             FrostedBar(studyLayer, colors, modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(top = top)) {
-            if (viewport.compact) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 24.dp),
+            if (viewport.split) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 24.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(24.dp)) {
                 UiHeading(mode, colors, Modifier.weight(1f), 25)
                 Text("生词 / ${state.count { !it.archived }}", color = colors.muted, fontSize = 11.sp)
@@ -425,13 +425,13 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
         }
         if (issueOpen && displayed?.question != null) {
             Box(Modifier.fillMaxSize().quietClickable { issueOpen = false })
-            SimpleChoiceSheet("题目错误", colors, top + 50.dp, listOf("干扰义项与正确义相近", "多个答案成立", "正确释义有误", "词形 / 上下文不匹配", "其他")) {
+            SimpleChoiceSheet("题目错误", colors, top, 50.dp, listOf("干扰义项与正确义相近", "多个答案成立", "正确释义有误", "词形 / 上下文不匹配", "其他")) {
                 learning.reportIssue(displayed.question, it); issueOpen = false; message = "已记录问题，仅撤销本次评分"
             }
         }
         heatDay?.let { day ->
             GlassScrim(colors) { heatDay = null }
-            SimpleChoiceSheet(day, colors, top + 60.dp, listOf("查询 · ${learning.heatmap()[day]?.get("lookup") ?: 0}",
+            SimpleChoiceSheet(day, colors, top, 60.dp, listOf("查询 · ${learning.heatmap()[day]?.get("lookup") ?: 0}",
                 "书签 · ${learning.heatmap()[day]?.get("bookmark") ?: 0}", "复习 · ${learning.heatmap()[day]?.get("review") ?: 0}")) { heatDay = null }
         }
         if (progressOpen) GlassScrim(colors) { percentFlightText = percent; percentFlightSource = percentSource; progressOpen = false }
@@ -482,10 +482,10 @@ internal fun StudyWordText(word: String, size: Float, colors: Palette, hidden: B
 }
 
 @Composable
-internal fun SimpleChoiceSheet(title: String, colors: Palette, top: Dp, choices: List<String>, contentTitle: Boolean = false, onSelect: (String) -> Unit) {
+internal fun SimpleChoiceSheet(title: String, colors: Palette, safeTop: Dp, spacing: Dp, choices: List<String>, contentTitle: Boolean = false, onSelect: (String) -> Unit) {
     val viewport = LocalReaderViewport.current
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-    Column(Modifier.width(viewport.sheetWidth.dp).padding(top = top.coerceAtMost((viewport.height * .15f).dp))
+    Column(Modifier.width(viewport.sheetWidth.dp).padding(top = safeTop + spacing.coerceAtMost((viewport.height * .15f).dp))
         .navigationBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 5.dp)) {
         RevealElement(0, title) {
             if (contentTitle) Text(title, Modifier.padding(bottom = 24.dp), color = colors.ink, fontFamily = ReadingFont, fontSize = 30.sp)

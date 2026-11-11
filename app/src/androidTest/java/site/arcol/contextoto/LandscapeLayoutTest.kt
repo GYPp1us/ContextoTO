@@ -93,6 +93,27 @@ class LandscapeLayoutTest {
         assertTrue("$tag outside right safe edge", sheet.right <= surface.right + 1)
     }
 
+    @Test fun changingArticlesDoesNotPauseAutomaticBookmarks() {
+        val second = content.articles[1]
+        ui.onNodeWithTag("article-menu-button").performClick()
+        ui.onNodeWithText("02").performClick()
+        ui.onNodeWithTag("reader-list").performScrollToIndex(2)
+        ui.waitUntil(5_000) { store.bookmarkPlace(second.id).paragraph >= 1 }
+    }
+
+    @Test fun importedArticleWithAnEmptyTitleSurvivesRotation() {
+        val imported = Article("local-untitled", "导入", "", listOf("This imported article has a body and an empty title."))
+        ui.runOnIdle { content.refresh(listOf(imported), emptyList(), emptyMap()) }
+        val articleNumber = content.articles.size
+        ui.onNodeWithTag("article-menu-button").performClick()
+        ui.onNodeWithTag("article-directory-list").performScrollToIndex(articleNumber - 1)
+        ui.onNode(hasAnyAncestor(hasTestTag("article-directory-list")) and hasText(articleNumber.toString().padStart(2, '0'))).performClick()
+        ui.onNodeWithTag("reader-paragraph-0").assertTextEquals(imported.paragraphs.single())
+        rotate(false)
+        rotate(true)
+        ui.onNodeWithTag("reader-paragraph-0").assertIsDisplayed()
+    }
+
     @Test fun wordDetailSurvivesBothRotationsAndKeepsItsBounds() {
         screenshot("01-reading-wide")
         ui.onNodeWithTag("reader-list").performScrollToIndex(1)
