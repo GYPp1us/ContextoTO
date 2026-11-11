@@ -16,6 +16,8 @@
 
 ## 开发
 
+横屏使用统一的可用窗口版式：紧凑单行顶栏、连贯单栏阅读，解析与复习按内容角色分区；大字号或窄窗口自然回落到单列。旋转保留面板、查询浮层、当前题目和设置草稿，并按字符锚点恢复阅读位置。安全区统一避让左右挖孔与导航栏，过渡坐标随重排更新。实现与截图验收见 [横屏审查说明](docs/LANDSCAPE_REVIEW.md)。本改动仅提 PR，不改变 rc7 版本号或发布标签。
+
 需要 JDK 17+、Android SDK API 36、Android SDK Build Tools 36、Python 3.10+。构建使用 Gradle Wrapper：
 
 ```powershell

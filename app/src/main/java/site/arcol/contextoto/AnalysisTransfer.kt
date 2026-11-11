@@ -49,7 +49,7 @@ internal fun AnalysisTransferOverlay(content: Content, store: UserStore, engine:
     }
     BackHandler(true) { if (!working) onClose() }
     GlassScrim(colors) { if (!working) onClose() }
-    Column(Modifier.fillMaxSize().padding(top = top + 24.dp).navigationBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp)) {
+    DetailColumns(Modifier.fillMaxSize().padding(top = top + 16.dp).navigationBarsPadding().imePadding().padding(horizontal = 28.dp), leading = {
         RevealElement(0, "archive") { UiHeading("ARTICLES & ANALYSES", colors, size = 25) }
         RevealElement(1, "archive") { Text("ZIP 解析包 · 可跨设备导入", color = colors.word, fontSize = 13.sp, modifier = Modifier.padding(top = 15.dp)) }
         Text("只包含文章、词形与解析。复习队列、评分、纠错、热度、书签、阅读位置、查询历史、密钥和专注配置均不导出。", color = colors.muted,
@@ -64,6 +64,8 @@ internal fun AnalysisTransferOverlay(content: Content, store: UserStore, engine:
         JumpLink("导入解析包", colors, Modifier.fillMaxWidth().padding(top = 12.dp), enabled = !working) {
             importer.launch(arrayOf("application/zip", "application/octet-stream"))
         }
+        if (LocalReaderViewport.current.split) JumpLink("返回", colors, Modifier.fillMaxWidth().padding(vertical = 24.dp), enabled = !working, onClick = onClose)
+    }, trailing = {
         if (status.isNotBlank()) Text(status, color = colors.word, fontSize = 13.sp, lineHeight = 20.sp, modifier = Modifier.padding(vertical = 18.dp))
         plan?.let { bundle ->
             UiHeading("PREVIEW", colors, size = 15)
@@ -83,6 +85,6 @@ internal fun AnalysisTransferOverlay(content: Content, store: UserStore, engine:
                 }
             }
         }
-        JumpLink("返回", colors, Modifier.fillMaxWidth().padding(vertical = 24.dp), enabled = !working, onClick = onClose)
-    }
+        if (!LocalReaderViewport.current.split) JumpLink("返回", colors, Modifier.fillMaxWidth().padding(vertical = 24.dp), enabled = !working, onClick = onClose)
+    })
 }

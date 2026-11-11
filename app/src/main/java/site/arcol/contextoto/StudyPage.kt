@@ -18,6 +18,9 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
@@ -40,6 +43,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontFamily
@@ -80,6 +84,7 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
     var detail by remember { mutableStateOf<StudyDetail?>(null) }
     var lastDetail by remember { mutableStateOf<StudyDetail?>(null) }
     var source by remember { mutableStateOf<TokenGlyph?>(null) }
+    val wordSources = remember { mutableStateMapOf<String, TokenGlyph>() }
     var destination by remember { mutableStateOf<TokenGlyph?>(null) }
     var actionsWord by remember { mutableStateOf<String?>(null) }
     var actionsQuestion by remember { mutableStateOf<ReviewQuestion?>(null) }
@@ -97,6 +102,7 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
     var percentFlightText by remember { mutableStateOf("0%") }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
+    val viewport = LocalReaderViewport.current
     val motion = remember { Animatable(0f) }
     val percentMotion = remember { Animatable(0f) }
     val tasks by engine.tasks.collectAsState()
@@ -184,6 +190,10 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
     val detailBlur by animateFloatAsState(if (issueOpen || actionsWord != null || externalOverlay) GLASS_BLUR else 0f, tween(240), label = "study detail blur")
     BoxWithConstraints(modifier.onGloballyPositioned { studyCoordinates = it }) {
         val pageWidth = maxWidth; val pageHeight = maxHeight
+        LaunchedEffect(pageWidth, pageHeight) {
+            if (detail != null) motion.snapTo(1f)
+            if (progressOpen) percentMotion.snapTo(1f)
+        }
         val studyLayer = rememberGraphicsLayer()
         var headerHeight by remember { mutableStateOf(106.dp) }
         Box(Modifier.fillMaxSize().graphicsLayer {
@@ -194,6 +204,16 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
         }) {
             FrostedBar(studyLayer, colors, modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.padding(top = top)) {
+            if (viewport.split) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 24.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                UiHeading(mode, colors, Modifier.weight(1f), 25)
+                Text("生词 / ${state.count { !it.archived }}", color = colors.muted, fontSize = 11.sp)
+                FocusStatusLabel(focusStatus, colors, onFocus)
+                StudyWordText(percent, 14f, colors, percentDestination != null && (progressOpen || percentMotion.value > .001f),
+                    Modifier.quietClickable { percentFlightText = percent; percentFlightSource = percentSource; percentDestination = null; progressOpen = true }
+                        .padding(vertical = 12.dp), onGlyph = { percentSource = it }, ink = colors.word)
+                Text("≡", Modifier.testTag("study-menu-button").quietClickable { onMenu(true) }.padding(vertical = 8.dp, horizontal = 6.dp), color = colors.ink, fontSize = 25.sp)
+            } else {
             Row(Modifier.fillMaxWidth().heightIn(min = cutoutHeight.coerceAtLeast(24.dp)).padding(horizontal = 24.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                 FocusStatusLabel(focusStatus, colors, onFocus)
                 Spacer(Modifier.weight(1f))
@@ -204,7 +224,8 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
             Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 12.dp, bottom = 20.dp), verticalAlignment = Alignment.CenterVertically) {
                 UiHeading(mode, colors, Modifier.weight(1f), 25)
                 Text("生词  /  ${state.count { !it.archived }}", color = colors.muted, fontSize = 11.sp)
-                Text("≡", Modifier.clickable { onMenu(true) }.padding(start = 16.dp), color = colors.ink, fontSize = 25.sp)
+                Text("≡", Modifier.testTag("study-menu-button").clickable { onMenu(true) }.padding(start = 16.dp), color = colors.ink, fontSize = 25.sp)
+            }
             }
             }
             }
@@ -216,7 +237,7 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                 "复习" -> {
                     val q = question
                     if (q == null) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
+                        Column(Modifier.weight(1f).padding(top = headerHeight).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.Center) {
                             if (loading) {
                                 UiHeading("PREPARING", colors, size = 30)
                                 PreparationProgress(preparation, colors)
@@ -238,16 +259,16 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                             }
                         }
                     } else RevealElement(0, q.id, Modifier.weight(1f)) {
-                      Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = headerHeight)) {
-                        Spacer(Modifier.height(24.dp))
+                      ReviewLayout(Modifier.fillMaxSize().padding(top = headerHeight), word = {
                         StudyWordText(q.word, 44f, colors, (detail ?: lastDetail.takeIf { motion.value > .001f })?.word == q.word && destination != null,
-                            Modifier.fillMaxWidth().padding(bottom = 34.dp), onGlyph = { source = it })
+                            Modifier.fillMaxWidth().padding(bottom = if (viewport.split) 0.dp else 34.dp), onGlyph = { source = it; wordSources[q.word] = it })
+                      }, answers = {
                         q.options.forEachIndexed { i, option ->
                             val correct = q.answered && i == q.correct
                             val wrong = q.answered && i == q.selected && !correct
                             val accent = when { correct -> colors.word; wrong -> colors.paragraph; else -> colors.muted }
-                            Column(Modifier.fillMaxWidth().padding(bottom = 10.dp).background(accent.copy(alpha = if (correct || wrong) .18f else .07f))
-                                .clickable(enabled = !q.answered) { answer("choice", i) }.padding(horizontal = 18.dp, vertical = 17.dp)) {
+                            Column(Modifier.fillMaxWidth().padding(bottom = if (viewport.split) 7.dp else 10.dp).background(accent.copy(alpha = if (correct || wrong) .18f else .07f))
+                                .clickable(enabled = !q.answered) { answer("choice", i) }.padding(horizontal = 18.dp, vertical = if (viewport.split) 10.dp else 17.dp)) {
                                 Row(verticalAlignment = Alignment.Top) {
                                     Text(('A' + i).toString(), Modifier.width(28.dp), color = accent, fontFamily = ReadingFont, fontSize = 17.sp)
                                     Text(option, color = if (q.answered && !correct && !wrong) colors.muted else colors.ink,
@@ -255,15 +276,15 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                                 }
                             }
                         }
-                        Row(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 36.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = if (viewport.split) 12.dp else 36.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             listOf("记住了" to "remember", "忘记了" to "forget", "不要了" to "archive").forEach { (label, action) ->
                                 Box(Modifier.weight(1f).background(colors.word.copy(alpha = .10f)).clickable(enabled = !q.answered) { answer(action) }
-                                    .padding(vertical = 17.dp), contentAlignment = Alignment.Center) {
+                                    .padding(vertical = if (viewport.split) 13.dp else 17.dp), contentAlignment = Alignment.Center) {
                                     Text(label, color = colors.ink, fontSize = 13.sp)
                                 }
                             }
                         }
-                    }
+                    })
                     }
                 }
                 "列表" -> {
@@ -277,9 +298,10 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                     val rows = state.filter { it.word.contains(search, true) && when (filter) {
                         "在学" -> !it.archived; "已学会" -> it.mastered; "归档" -> it.archived; else -> true
                     } }
-                    LazyColumn(Modifier.weight(1f)) {
+                    LazyVerticalGrid(columns = GridCells.Fixed(if (viewport.split) 2 else 1), modifier = Modifier.weight(1f),
+                        horizontalArrangement = Arrangement.spacedBy(viewport.gap.dp)) {
                         if (rows.isEmpty()) item { Text("这里还没有单词", color = colors.muted, modifier = Modifier.padding(top = 25.dp)) }
-                        items(rows, key = { it.word }) { word ->
+                        gridItems(rows, key = { it.word }) { word ->
                             var glyph by remember { mutableStateOf<TokenGlyph?>(null) }
                             var coordinates by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
                             Column(Modifier.fillMaxWidth().onGloballyPositioned { coordinates = it }.pointerInput(word.word) {
@@ -288,7 +310,7 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                                     actionsQuestion = null; actionsWord = word.word
                                 })
                             }.padding(vertical = 14.dp)) {
-                                StudyWordText(word.word, 25f, colors, (detail ?: lastDetail.takeIf { motion.value > .001f })?.word == word.word && destination != null, onGlyph = { glyph = it })
+                                StudyWordText(word.word, 25f, colors, (detail ?: lastDetail.takeIf { motion.value > .001f })?.word == word.word && destination != null, onGlyph = { glyph = it; wordSources[word.word] = it })
                                 val brief = remember(word.word, epoch, cacheRevision) { learning.meanings(word.word).firstOrNull()?.text.orEmpty() }
                                 Text(brief.ifBlank { "释义待补齐" }, color = colors.muted, fontFamily = FontFamily.Serif, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp))
                                 Text(if (word.archived) "已归档" else if (word.mastered) "长期间隔" else "${word.memory.reviews} 次复习 · ${learning.appearances(word.word).size} 个出现",
@@ -306,10 +328,11 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
         if (active || menuFraction > .001f) Box(Modifier.fillMaxSize().zIndex(2f)) {
         if (menuFraction > .001f) {
             Box(Modifier.fillMaxSize().background(colors.paper.copy(alpha = GLASS_TINT * menuFraction)).quietClickable { onMenu(false) })
-            Column(Modifier.align(Alignment.CenterEnd).width(pageWidth * .8f).fillMaxHeight().graphicsLayer {
+            DetailColumns(Modifier.align(Alignment.CenterEnd).width(pageWidth * .8f).fillMaxHeight().graphicsLayer {
                 translationX = with(density) { pageWidth.toPx() } * .16f * (1f - menuFraction); alpha = menuFraction
-            }.padding(top = top + 28.dp).verticalScroll(rememberScrollState()).padding(horizontal = 30.dp), verticalArrangement = Arrangement.spacedBy(28.dp)) {
-                UiHeading("WORDS", colors, size = 25)
+            }.padding(top = top + if (viewport.compact) 12.dp else 28.dp).navigationBarsPadding().padding(horizontal = 30.dp),
+                header = { UiHeading("WORDS", colors, Modifier.padding(bottom = 20.dp), 25) }, leading = {
+                Column(verticalArrangement = Arrangement.spacedBy(if (viewport.compact) 8.dp else 28.dp)) {
                 listOf("复习", "列表", "词库").forEachIndexed { i, item -> Box(Modifier.graphicsLayer {
                     val amount = ((menuFraction - i * .08f) / (1f - i * .08f)).coerceIn(0f, 1f)
                     alpha = amount; translationY = -8.dp.toPx() * (1f - amount)
@@ -319,10 +342,14 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                     }.padding(vertical = 12.dp),
                         color = if (mode == item) colors.word else colors.ink, fontSize = 23.sp, fontFamily = ReadingFont, fontWeight = FontWeight.Bold)
                 } }
+                }
+            }, trailing = {
+                Column(verticalArrangement = Arrangement.spacedBy(if (viewport.compact) 12.dp else 28.dp)) {
                 JumpLink("导入词库", colors) { onMenu(false); onImport() }
                 JumpLink("使用引导", colors) { onMenu(false); onGuide() }
                 JumpLink("设置", colors) { onMenu(false); onSettings() }
-            }
+                }
+            })
         }
         val displayed = detail ?: lastDetail
         if (detail != null || motion.value > .001f) {
@@ -380,7 +407,7 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
             }
         }
         if (active && displayed != null && destination != null && !issueOpen && (detail != null || displayed.question == null))
-            MotionGlyphs(listOf(displayed.anchor), listOf(destination!!), motion.value, detail != null)
+            MotionGlyphs(listOf(wordSources[displayed.word] ?: displayed.anchor), listOf(destination!!), motion.value, detail != null)
         if (actionsWord != null) {
             if (detail != null) Box(Modifier.fillMaxSize().quietClickable { actionsWord = null; actionsQuestion = null })
             else GlassScrim(colors) { actionsWord = null; actionsQuestion = null }
@@ -398,13 +425,13 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
         }
         if (issueOpen && displayed?.question != null) {
             Box(Modifier.fillMaxSize().quietClickable { issueOpen = false })
-            SimpleChoiceSheet("题目错误", colors, top + 50.dp, listOf("干扰义项与正确义相近", "多个答案成立", "正确释义有误", "词形 / 上下文不匹配", "其他")) {
+            SimpleChoiceSheet("题目错误", colors, top, 50.dp, listOf("干扰义项与正确义相近", "多个答案成立", "正确释义有误", "词形 / 上下文不匹配", "其他")) {
                 learning.reportIssue(displayed.question, it); issueOpen = false; message = "已记录问题，仅撤销本次评分"
             }
         }
         heatDay?.let { day ->
             GlassScrim(colors) { heatDay = null }
-            SimpleChoiceSheet(day, colors, top + 60.dp, listOf("查询 · ${learning.heatmap()[day]?.get("lookup") ?: 0}",
+            SimpleChoiceSheet(day, colors, top, 60.dp, listOf("查询 · ${learning.heatmap()[day]?.get("lookup") ?: 0}",
                 "书签 · ${learning.heatmap()[day]?.get("bookmark") ?: 0}", "复习 · ${learning.heatmap()[day]?.get("review") ?: 0}")) { heatDay = null }
         }
         if (progressOpen) GlassScrim(colors) { percentFlightText = percent; percentFlightSource = percentSource; progressOpen = false }
@@ -427,9 +454,20 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                 }
             }
         }
-        if (active && percentFlightSource != null && percentDestination != null) MotionGlyphs(listOf(percentFlightSource!!), listOf(percentDestination!!), percentMotion.value, progressOpen)
+        if (active && percentFlightSource != null && percentDestination != null) MotionGlyphs(listOf(percentSource ?: percentFlightSource!!), listOf(percentDestination!!), percentMotion.value, progressOpen)
         }
     }
+}
+
+@Composable
+private fun ReviewLayout(modifier: Modifier, word: @Composable () -> Unit, answers: @Composable ColumnScope.() -> Unit) {
+    val viewport = LocalReaderViewport.current
+    if (viewport.split) Row(modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(viewport.gap.dp)) {
+        Box(Modifier.weight(.38f).fillMaxHeight(), contentAlignment = Alignment.CenterStart) {
+            Column(Modifier.verticalScroll(rememberScrollState())) { word() }
+        }
+        Column(Modifier.weight(.62f).fillMaxHeight().verticalScroll(rememberScrollState()), content = answers)
+    } else Column(modifier.verticalScroll(rememberScrollState()).padding(top = 24.dp)) { word(); answers() }
 }
 
 @Composable
@@ -444,8 +482,11 @@ internal fun StudyWordText(word: String, size: Float, colors: Palette, hidden: B
 }
 
 @Composable
-internal fun SimpleChoiceSheet(title: String, colors: Palette, top: Dp, choices: List<String>, contentTitle: Boolean = false, onSelect: (String) -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(top = top).navigationBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 32.dp)) {
+internal fun SimpleChoiceSheet(title: String, colors: Palette, safeTop: Dp, spacing: Dp, choices: List<String>, contentTitle: Boolean = false, onSelect: (String) -> Unit) {
+    val viewport = LocalReaderViewport.current
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+    Column(Modifier.width(viewport.sheetWidth.dp).padding(top = safeTop + spacing.coerceAtMost((viewport.height * .15f).dp))
+        .navigationBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 5.dp)) {
         RevealElement(0, title) {
             if (contentTitle) Text(title, Modifier.padding(bottom = 24.dp), color = colors.ink, fontFamily = ReadingFont, fontSize = 30.sp)
             else UiHeading(title, colors, Modifier.padding(bottom = 24.dp), 26)
@@ -454,7 +495,7 @@ internal fun SimpleChoiceSheet(title: String, colors: Palette, top: Dp, choices:
             if (choice.endsWith(" →")) JumpLink(choice, colors, Modifier.fillMaxWidth().padding(vertical = 10.dp), size = 16) { onSelect(choice) }
             else Text(choice, Modifier.fillMaxWidth().clickable { onSelect(choice) }.padding(vertical = 18.dp), color = colors.word, fontFamily = FontFamily.SansSerif, fontSize = 16.sp)
         } }
-    }
+    } }
 }
 
 @Composable
@@ -463,10 +504,12 @@ private fun NearbyChoices(word: String, colors: Palette, anchor: Offset, width: 
     val menuWidth = minOf(240.dp, width * .66f)
     val x = (with(density) { anchor.x.toDp() } - menuWidth / 2).coerceIn(16.dp, (width - menuWidth - 16.dp).coerceAtLeast(16.dp))
     val fingerY = with(density) { anchor.y.toDp() }
-    val estimated = 200.dp
+    var measuredHeight by remember(word, width, height) { mutableStateOf(200.dp) }
+    val estimated = measuredHeight
     val y = (if (fingerY + estimated + 40.dp < height) fingerY + 12.dp else fingerY - estimated - 12.dp)
         .coerceIn(safeTop + 12.dp, (height - estimated - 36.dp).coerceAtLeast(safeTop + 12.dp))
-    Column(Modifier.offset(x, y).width(menuWidth)) {
+    Column(Modifier.offset(x, y).width(menuWidth).heightIn(max = (height - y - 12.dp).coerceAtLeast(1.dp))
+        .verticalScroll(rememberScrollState()).onSizeChanged { measuredHeight = with(density) { it.height.toDp() } }) {
         RevealElement(0, word to anchor) { Text(word, color = colors.ink, fontFamily = ReadingFont, fontSize = 20.sp,
             modifier = Modifier.padding(bottom = 12.dp)) }
         listOf("记住了", "忘记了", "不要了").forEachIndexed { index, label -> RevealElement(index + 1, word to anchor) {
@@ -526,8 +569,8 @@ private fun StudyLibraries(content: Content, learning: LearningStore, state: Lis
     val queried = remember(epoch) { learning.queried() }
     val mastered = state.filter { it.mastered }.map { it.word }.toSet()
     val heat = remember(epoch) { learning.heatmap() }
-    RetainedColumn(modifier.fillMaxWidth()) {
-        Spacer(Modifier.height(headerHeight))
+    val viewport = LocalReaderViewport.current
+    DetailColumns(modifier.fillMaxWidth().padding(top = headerHeight), leading = {
         Text(bank.name + "  ⌄", Modifier.fillMaxWidth().clickable { choosing = !choosing }.padding(vertical = 15.dp), color = colors.ink,
             fontFamily = FontFamily.Serif, fontSize = 22.sp)
         RetainedFoldout(choosing, "banks") { Column { content.banks.forEachIndexed { i, option -> RevealElement(i, option.id) {
@@ -535,7 +578,7 @@ private fun StudyLibraries(content: Content, learning: LearningStore, state: Lis
         } } } }
         Text("${bank.words.size} 个词元", color = colors.muted, fontSize = 11.sp)
         JumpLink(if (importing) "正在加入…" else "随机加入 $importCount 个词", colors,
-            Modifier.padding(vertical = 24.dp).graphicsLayer { scaleX = pulse; scaleY = pulse }, enabled = !importing, size = 16) {
+            Modifier.padding(vertical = if (viewport.compact) 8.dp else 24.dp).graphicsLayer { scaleX = pulse; scaleY = pulse }, enabled = !importing, size = 16) {
             importing = true
             scope.launch {
                 try {
@@ -558,9 +601,11 @@ private fun StudyLibraries(content: Content, learning: LearningStore, state: Lis
                 Box(Modifier.fillMaxWidth(if (bank.words.isEmpty()) 0f else count.toFloat() / bank.words.size).fillMaxHeight().background(colors.word))
             }
         }
-        UiHeading("DAILY RHYTHM", colors, Modifier.padding(top = 34.dp, bottom = 12.dp), 24)
+    }, trailing = {
+        UiHeading("DAILY RHYTHM", colors, Modifier.padding(top = if (viewport.split) 12.dp else 34.dp, bottom = 12.dp), 24)
         Text("全局活动 · 查询 / 书签 / 复习", color = colors.muted, fontSize = 11.sp, modifier = Modifier.padding(bottom = 16.dp))
         val end = LocalDate.now(); val start = end.minusDays(83)
+        Column(Modifier.widthIn(max = if (viewport.compact) 300.dp else Dp.Infinity)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             repeat(12) { week -> Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 repeat(7) { weekday ->
@@ -573,9 +618,10 @@ private fun StudyLibraries(content: Content, learning: LearningStore, state: Lis
         }
         Row(Modifier.fillMaxWidth().padding(top = 8.dp)) { Text(start.toString(), color = colors.muted, fontSize = 9.sp)
             Spacer(Modifier.weight(1f)); Text(end.toString(), color = colors.muted, fontSize = 9.sp) }
+        }
         JumpLink("导入词库", colors, Modifier.padding(vertical = 30.dp), onClick = onImport)
         BankManagementSection(bank, content, learning, colors, onMessage)
-    }
+    })
 }
 
 @Composable
