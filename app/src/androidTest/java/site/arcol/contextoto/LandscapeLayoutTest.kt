@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableFloatStateOf
@@ -60,9 +61,12 @@ class LandscapeLayoutTest {
 
     private fun rotate(wide: Boolean) {
         val host = ui.activity
+        val orientation = if (wide) Configuration.ORIENTATION_LANDSCAPE else Configuration.ORIENTATION_PORTRAIT
         ui.runOnUiThread { host.requestedOrientation = if (wide) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
         ui.waitUntil(15_000) {
-            runCatching { ui.onNodeWithTag("reader-surface").fetchSemanticsNode().boundsInRoot.let { (it.width > it.height) == wide } }.getOrDefault(false)
+            host.resources.configuration.orientation == orientation && runCatching {
+                ui.onNodeWithTag("reader-surface").fetchSemanticsNode().boundsInRoot.let { (it.width > it.height) == wide }
+            }.getOrDefault(false)
         }
         ui.waitForIdle()
         assertSame("Rotation must not replace the screen or its in-flight UI", host, ui.activity)
@@ -158,8 +162,15 @@ class LandscapeLayoutTest {
         screenshot("07b-settings-keyboard-wide")
         rotate(false); rotate(true)
         ui.onNodeWithText("17").assertExists()
-        ui.onNodeWithText("保存并返回").assertIsDisplayed().performClick()
-        assertEquals(17, settings.randomImportCount)
+        val save = ui.onNodeWithText("保存并返回")
+        save.assertIsDisplayed().performClick()
+        try {
+            ui.runOnIdle { assertEquals(17, settings.randomImportCount) }
+            save.assertDoesNotExist()
+        } catch (failure: AssertionError) {
+            screenshot("07c-settings-save-failure")
+            throw failure
+        }
         ui.onNodeWithTag("reader-list").assertIsDisplayed()
     }
 
