@@ -14,7 +14,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,6 +31,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
@@ -36,28 +39,36 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
+internal enum class SettingsSection { GENERAL, MODEL, FOCUS, REVIEW }
+
 @Composable
 internal fun SettingsSheet(
-    colors: Palette, dark: Boolean, markQueriedWords: Boolean, silentInference: Boolean,
-    customStatusBar: Boolean, bookmarkVisible: Boolean, current: Provider, settings: SecureSettings,
+    colors: Palette, current: Provider, settings: SecureSettings, section: SettingsSection, top: Dp,
     updateStatus: String, updateInfo: UpdateInfo?, updateChecking: Boolean,
-    focusStatus: String, modifier: Modifier,
-    onDark: (Boolean) -> Unit, onMarkQueriedWords: (Boolean) -> Unit,
-    onSilentInference: (Boolean) -> Unit, onCustomStatusBar: (Boolean) -> Unit,
-    onBookmarkVisible: (Boolean) -> Unit, onCheckUpdate: () -> Unit,
-    onDownloadUpdate: () -> Unit, onSave: () -> Unit, onBack: () -> Unit, onArchive: () -> Unit = {}
+    focusStatus: String, modifier: Modifier, confirmingDiscard: Boolean,
+    onDirtyChanged: (Boolean) -> Unit, onConfirmDiscard: () -> Unit, onKeepEditing: () -> Unit,
+    onCheckUpdate: () -> Unit, onDownloadUpdate: () -> Unit, onSave: () -> Unit, onBack: () -> Unit,
+    onArchive: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val viewport = LocalReaderViewport.current
     val categories = remember { List(5) { BringIntoViewRequester() } }
+    val sectionField = remember { BringIntoViewRequester() }
     var footerHeight by remember { mutableStateOf(112.dp) }
     val names = remember { listOf("DeepSeek 官方", "Command Code GOAT", "自定义") }
     var selected by remember { mutableStateOf(current.name) }
     val keys = remember { mutableStateMapOf<String, String>() }
-    val models = remember { mutableStateMapOf<String, String>().apply { names.forEach { put(it, settings.modelForProvider(it)) } } }
-    val protocols = remember { mutableStateMapOf<String, ApiProtocol>().apply { names.forEach { put(it, settings.protocolForProvider(it)) } } }
+    val savedModels = remember { names.associateWith(settings::modelForProvider) }
+    val savedProtocols = remember { names.associateWith(settings::protocolForProvider) }
+    val models = remember { mutableStateMapOf<String, String>().apply { putAll(savedModels) } }
+    val protocols = remember { mutableStateMapOf<String, ApiProtocol>().apply { putAll(savedProtocols) } }
     var url by remember { mutableStateOf(settings.customBaseUrl) }
+    var dark by remember { mutableStateOf(settings.dark) }
+    var markQueriedWords by remember { mutableStateOf(settings.markQueriedWords) }
+    var silentInference by remember { mutableStateOf(settings.silentInference) }
+    var customStatusBar by remember { mutableStateOf(settings.customStatusBar) }
+    var bookmarkVisible by remember { mutableStateOf(settings.bookmarkVisible) }
     var bodySize by remember { mutableStateOf(settings.bodySize) }
     var lineFactor by remember { mutableStateOf(settings.lineFactor) }
     var sideMargin by remember { mutableStateOf(settings.sideMargin) }
@@ -65,20 +76,36 @@ internal fun SettingsSheet(
     var cutoutFactor by remember { mutableStateOf(settings.cutoutFactor) }
     var importCountInput by remember { mutableStateOf(settings.randomImportCount.toString()) }
     var reviewLimitInput by remember { mutableStateOf(settings.dailyReviewLimit.toString()) }
-    var reviewExpanded by remember { mutableStateOf(false) }
+    var reviewExpanded by remember { mutableStateOf(section == SettingsSection.REVIEW) }
     val settingsLayer = rememberGraphicsLayer()
     var footerY by remember { mutableFloatStateOf(0f) }
-    var modelExpanded by remember { mutableStateOf(false) }
-    var focusExpanded by remember { mutableStateOf(false) }
+    var modelExpanded by remember { mutableStateOf(section == SettingsSection.MODEL) }
+    var focusExpanded by remember { mutableStateOf(section == SettingsSection.FOCUS) }
     var scaleExpanded by remember { mutableStateOf(false) }
     var saveError by remember { mutableStateOf<String?>(null) }
-    var focusUrlInput by remember { mutableStateOf(settings.focusUrl) }
-    var focusLinkEditing by remember { mutableStateOf(settings.focusUrl.isBlank()) }
+    val savedFocusUrl = remember { settings.focusUrl }
+    var focusUrlInput by remember { mutableStateOf(savedFocusUrl) }
+    var focusLinkEditing by remember { mutableStateOf(savedFocusUrl.isBlank()) }
     var focusCatalog by remember { mutableStateOf<FocusCatalog?>(null) }
     var focusSubjectId by remember { mutableIntStateOf(settings.focusSubjectId) }
     var focusItemId by remember { mutableIntStateOf(settings.focusItemId) }
     var focusCatalogStatus by remember { mutableStateOf("填写上报链接后读取目录") }
     var focusCatalogLoading by remember { mutableStateOf(false) }
+    val dirty = selected != current.name || keys.values.any(String::isNotBlank) ||
+        names.any { models[it] != savedModels[it] || protocols[it] != savedProtocols[it] } || url != settings.customBaseUrl ||
+        dark != settings.dark || markQueriedWords != settings.markQueriedWords || silentInference != settings.silentInference ||
+        customStatusBar != settings.customStatusBar || bookmarkVisible != settings.bookmarkVisible ||
+        bodySize != settings.bodySize || lineFactor != settings.lineFactor || sideMargin != settings.sideMargin ||
+        paragraphGap != settings.paragraphGap || cutoutFactor != settings.cutoutFactor ||
+        importCountInput != settings.randomImportCount.toString() || reviewLimitInput != settings.dailyReviewLimit.toString() ||
+        focusUrlInput != savedFocusUrl || focusSubjectId != settings.focusSubjectId || focusItemId != settings.focusItemId
+    SideEffect { onDirtyChanged(dirty) }
+    LaunchedEffect(section) {
+        if (section != SettingsSection.GENERAL) {
+            withFrameNanos { }
+            sectionField.bringIntoView()
+        }
+    }
     fun loadFocusCatalog() {
         if (focusCatalogLoading) return
         scope.launch {
@@ -109,13 +136,13 @@ internal fun SettingsSheet(
     LaunchedEffect(focusExpanded) {
         if (focusExpanded && focusUrlInput.isNotBlank() && focusCatalog == null) loadFocusCatalog()
     }
-    Box(modifier.imePadding()) {
+    Box(modifier.background(colors.paper).navigationBarsPadding().padding(top = top).imePadding()) {
         Row(Modifier.fillMaxSize().drawWithContent {
             settingsLayer.record { this@drawWithContent.drawContent() }; drawLayer(settingsLayer)
         }) {
         if (viewport.split) Column(Modifier.width(190.dp).fillMaxHeight().padding(start = 26.dp, end = 20.dp, top = 16.dp,
             bottom = footerHeight).verticalScroll(rememberScrollState())) {
-            JumpLink("返回阅读", colors, onClick = onBack)
+            JumpLink("返回", colors, onClick = onBack)
             UiHeading("SETTINGS", colors, Modifier.padding(top = 6.dp, bottom = 4.dp), 25)
             Text(BuildConfig.VERSION_NAME, color = colors.muted, fontSize = 11.sp)
             listOf("Reading", "Learning", "Connections", "Data", "About").forEachIndexed { index, title ->
@@ -128,21 +155,21 @@ internal fun SettingsSheet(
         RetainedColumn(Modifier.weight(1f).fillMaxHeight().clipToBounds().testTag("settings-form")
             .padding(horizontal = 26.dp).padding(top = if (viewport.compact) 6.dp else 24.dp, bottom = footerHeight + 12.dp)) {
             if (!viewport.split) {
-            JumpLink("返回阅读", colors, onClick = onBack)
+            JumpLink("返回", colors, onClick = onBack)
             Text(BuildConfig.VERSION_NAME, color = colors.muted, fontSize = 11.sp)
             Spacer(Modifier.height(12.dp))
             UiHeading("SETTINGS", colors, size = 30)
             }
             SettingsCategory("Reading", colors, Modifier.bringIntoViewRequester(categories[0]))
-            SwitchSetting("深色主题", "低饱和度的明暗阅读界面", dark, colors, onDark)
-            SwitchSetting("沉浸状态栏", "篇名、时间、进度和专注状态；保留挖孔安全区", customStatusBar, colors, onCustomStatusBar)
-            SwitchSetting("跟随书签", "沿句子轮廓包裹，随阅读与最远查询位置推进", bookmarkVisible, colors, onBookmarkVisible)
+            SwitchSetting("深色主题", "保存后应用主题", dark, colors) { dark = it }
+            SwitchSetting("沉浸状态栏", "篇名、时间、进度和专注状态；保留挖孔安全区", customStatusBar, colors) { customStatusBar = it }
+            SwitchSetting("跟随书签", "沿句子轮廓包裹，随阅读与最远查询位置推进", bookmarkVisible, colors) { bookmarkVisible = it }
             SettingsFoldout("正文比例", "${bodySize.roundToInt()} sp  ·  ${(lineFactor * 100).roundToInt()}% 行距",
                 scaleExpanded, colors, { scaleExpanded = !scaleExpanded }) {
                 RevealElement(0, "scale") {
                     Column {
                         SettingAction("恢复参考图比例", colors) {
-                            onDark(true); bodySize = 20f; lineFactor = 1.58f; sideMargin = 18f; paragraphGap = 30f
+                            dark = true; bodySize = 20f; lineFactor = 1.58f; sideMargin = 18f; paragraphGap = 30f
                         }
                         ScaleStepper("字号", "${bodySize.roundToInt()} sp", { bodySize = (bodySize - 1).coerceAtLeast(16f) },
                             { bodySize = (bodySize + 1).coerceAtMost(28f) }, colors)
@@ -158,10 +185,11 @@ internal fun SettingsSheet(
                 }
             }
             SettingsCategory("Learning", colors, Modifier.bringIntoViewRequester(categories[1]))
-            SwitchSetting("已查询单词加粗", "保留正文及从句的原有颜色；默认关闭", markQueriedWords, colors, onMarkQueriedWords)
-            SwitchSetting("静默推理", "后台逐句分析，会消耗所选模型额度；默认关闭", silentInference, colors, onSilentInference)
+            SwitchSetting("已查询单词加粗", "保留正文及从句的原有颜色；默认关闭", markQueriedWords, colors) { markQueriedWords = it }
+            SwitchSetting("静默推理", "后台逐句分析，会消耗所选模型额度；默认关闭", silentInference, colors) { silentInference = it }
             SettingsFoldout("复习与导入", "每次加入 $importCountInput 词 · 每日 ${if (reviewLimitInput == "0") "不限" else reviewLimitInput + " 词"}",
-                reviewExpanded, colors, { reviewExpanded = !reviewExpanded }) {
+                reviewExpanded, colors, { reviewExpanded = !reviewExpanded },
+                modifier = if (section == SettingsSection.REVIEW) Modifier.bringIntoViewRequester(sectionField) else Modifier) {
                 Column {
                     FieldLabel("随机加入词数", colors)
                     SettingInput("1–500", importCountInput, colors, onChange = { importCountInput = it.filter(Char::isDigit).take(3) })
@@ -173,7 +201,8 @@ internal fun SettingsSheet(
             }
             SettingsCategory("Connections", colors, Modifier.bringIntoViewRequester(categories[2]))
             SettingsFoldout("模型与连接", "$selected · ${models[selected].orEmpty().ifBlank { "选择模型" }}",
-                modelExpanded, colors, { modelExpanded = !modelExpanded }) {
+                modelExpanded, colors, { modelExpanded = !modelExpanded },
+                modifier = if (section == SettingsSection.MODEL) Modifier.bringIntoViewRequester(sectionField) else Modifier) {
                 RevealElement(0, "model-services") {
                     Column {
                         names.forEach { name -> ChoiceSetting(name, selected == name, colors) { selected = name } }
@@ -209,7 +238,8 @@ internal fun SettingsSheet(
                 }
             }
             SettingsFoldout("碎片专注", if (focusUrlInput.isBlank()) "未配置上报" else focusStatus,
-                focusExpanded, colors, { focusExpanded = !focusExpanded }) {
+                focusExpanded, colors, { focusExpanded = !focusExpanded },
+                modifier = if (section == SettingsSection.FOCUS) Modifier.bringIntoViewRequester(sectionField) else Modifier) {
                 RevealElement(0, "focus-link") {
                     Column {
                         Text("阅读页在前台时每 20 秒上报；退出阅读立即停止。", color = colors.muted, fontSize = 11.sp, lineHeight = 17.sp)
@@ -273,7 +303,7 @@ internal fun SettingsSheet(
                 if (importCountInput.toIntOrNull() !in 1..500 || reviewLimitInput.toIntOrNull() !in 0..2000) {
                     saveError = "加入数量须为 1–500，每日复习须为 0–2000"; reviewExpanded = true; return@JumpLink
                 }
-                val unchangedFocus = focusUrlInput == settings.focusUrl && focusSubjectId == settings.focusSubjectId && focusItemId == settings.focusItemId
+                val unchangedFocus = focusUrlInput == savedFocusUrl && focusSubjectId == settings.focusSubjectId && focusItemId == settings.focusItemId
                 if (focusUrlInput.isNotBlank() && !unchangedFocus && focusCatalog?.item(focusSubjectId, focusItemId) == null) {
                     saveError = "请读取上报目录，选择匹配的科目与事项"; focusExpanded = true; return@JumpLink
                 }
@@ -287,6 +317,11 @@ internal fun SettingsSheet(
                 protocols.forEach { (name, protocol) -> settings.saveProtocol(name, protocol) }
                 keys.filterValues { it.isNotBlank() }.forEach { (name, key) -> settings.saveKey(name, key) }
                 settings.rememberCacheProvider(settings.provider())
+                settings.dark = dark
+                settings.customStatusBar = customStatusBar
+                settings.bookmarkVisible = bookmarkVisible
+                settings.markQueriedWords = markQueriedWords
+                settings.silentInference = silentInference
                 settings.bodySize = bodySize; settings.lineFactor = lineFactor; settings.sideMargin = sideMargin; settings.paragraphGap = paragraphGap
                 settings.cutoutFactor = cutoutFactor; settings.randomImportCount = importCountInput.toInt(); settings.dailyReviewLimit = reviewLimitInput.toInt()
                 settings.focusUrl = focusUrlInput
@@ -297,6 +332,17 @@ internal fun SettingsSheet(
         })
         }
     }
+    if (confirmingDiscard) AlertDialog(
+        onDismissRequest = onKeepEditing,
+        containerColor = colors.paper,
+        title = { Text("放弃未保存的更改？", color = colors.ink) },
+        confirmButton = {
+            TextButton(onClick = onConfirmDiscard) { Text("放弃更改", color = colors.paragraph) }
+        },
+        dismissButton = {
+            TextButton(onClick = onKeepEditing) { Text("继续编辑", color = colors.word) }
+        }
+    )
 }
 
 @Composable
@@ -325,8 +371,8 @@ private fun SwitchSetting(label: String, detail: String, enabled: Boolean, color
 
 @Composable
 private fun SettingsFoldout(title: String, summary: String, expanded: Boolean, colors: Palette, toggle: () -> Unit,
-                            content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
+                            modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    Column(modifier.fillMaxWidth().padding(bottom = 10.dp)) {
         Row(Modifier.fillMaxWidth().background(colors.ink.copy(alpha = .035f)).clickable(onClick = toggle)
             .padding(horizontal = 14.dp, vertical = 15.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 16.dp)) {

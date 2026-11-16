@@ -18,7 +18,7 @@ class InteractionTest {
     @Test fun deckAnchorsAreBoundedAndVelocitySelectsAdjacentPage() {
         assertEquals(0f, deckTarget(.3f, 0f), .001f)
         assertEquals(1f, deckTarget(.3f, 4f), .001f)
-        assertEquals(-1f, deckTarget(-5f, -20f), .001f)
+        assertEquals(-.6f, deckTarget(-5f, -20f), .001f)
         assertEquals(1.6f, deckTarget(4f, 30f), .001f)
         assertEquals(-.6f, deckTarget(-.3f, -30f, -.6f..1f), .001f)
         assertEquals(0f, deckTarget(-.3f, 30f, -.6f..0f), .001f)
@@ -26,12 +26,12 @@ class InteractionTest {
         assertEquals(0f, deckTarget(-.6f, 3f, -1f..0f, settingsOnly = true), .001f)
         assertEquals(-1f, deckTarget(-.6f, 0f, -1f..0f, settingsOnly = true), .001f)
     }
-    @Test fun directoryCollapsesAsSettingsTakesItsPlace() {
+    @Test fun sidePanelFractionsReachFullVisibilityAtTheirOwnAnchors() {
         assertEquals(0f, directoryFraction(0f), .001f)
         assertEquals(.5f, directoryFraction(-.3f), .001f)
         assertEquals(1f, directoryFraction(-.6f), .001f)
-        assertEquals(.5f, directoryFraction(-.8f), .001f)
-        assertEquals(0f, directoryFraction(-1f), .001f)
+        assertEquals(0f, directoryFraction(1.6f), .001f)
+        assertEquals(.5f, wordMenuFraction(1.3f), .001f)
         assertEquals(1f, wordMenuFraction(1.6f), .001f)
     }
     @Test fun indexedDistractorsNeverIncludeHeadwordOrAnyTrueMeaning() {

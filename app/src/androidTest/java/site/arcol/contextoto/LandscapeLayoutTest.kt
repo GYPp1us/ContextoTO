@@ -24,6 +24,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import java.io.File
+import java.util.UUID
 
 /** Real Compose + rotation tests. Fixtures use an isolated DB/preferences and no network. */
 class LandscapeLayoutTest {
@@ -33,15 +34,15 @@ class LandscapeLayoutTest {
     private lateinit var content: Content
     private lateinit var settings: SecureSettings
     private var textScale by mutableFloatStateOf(1f)
+    private val fixtureId = "landscape-ui-${UUID.randomUUID()}"
 
     @Before fun fixture() {
-        context.deleteDatabase("landscape-ui.db")
-        store = UserStore(context, "landscape-ui.db")
+        store = UserStore(context, "$fixtureId.db")
         content = Content(context)
         AnalysisArchive.installPreset(context, content, store)
         val preferences = object : ContextWrapper(context) {
             override fun getSharedPreferences(name: String, mode: Int): SharedPreferences =
-                super.getSharedPreferences("landscape-ui-$name", mode).also { it.edit().clear().commit() }
+                super.getSharedPreferences("$fixtureId-$name", mode)
         }
         settings = SecureSettings(preferences).apply { guideStep = 4; dark = true; silentInference = false }
         LearningStore(store, content).addWord("research")
@@ -56,7 +57,9 @@ class LandscapeLayoutTest {
     @After fun cleanup() {
         ui.runOnUiThread { ui.activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
         ui.activityRule.scenario.close()
-        store.close(); context.deleteDatabase("landscape-ui.db")
+        store.close()
+        context.deleteDatabase("$fixtureId.db")
+        context.deleteSharedPreferences("$fixtureId-settings")
     }
 
     private fun rotate(wide: Boolean) {
@@ -174,6 +177,83 @@ class LandscapeLayoutTest {
         ui.onNodeWithTag("reader-list").assertIsDisplayed()
     }
 
+    @Test fun settingsBackKeepsDraftWritesTogether() {
+        ui.onNodeWithTag("article-menu-button").performClick()
+        ui.onNodeWithText("接口与外观设置").performClick()
+        ui.onNodeWithText("深色主题").performClick()
+        ui.runOnIdle { assertTrue(settings.dark) }
+        ui.runOnUiThread { ui.activity.onBackPressedDispatcher.onBackPressed() }
+        ui.onNodeWithText("放弃未保存的更改？").assertIsDisplayed()
+        ui.onNodeWithText("继续编辑").performClick()
+        ui.onNodeWithText("保存并返回").assertIsDisplayed()
+        ui.runOnUiThread { ui.activity.onBackPressedDispatcher.onBackPressed() }
+        ui.onNodeWithText("放弃更改").performClick()
+        ui.onNodeWithTag("settings-form").assertDoesNotExist()
+        ui.runOnIdle { assertTrue(settings.dark) }
+    }
+
+    @Test fun directoryCanOpenDuringSettingsExit() {
+        ui.onNodeWithTag("article-menu-button").performClick()
+        ui.onNodeWithText("接口与外观设置").performClick()
+        ui.onNodeWithText("保存并返回").assertIsDisplayed()
+        ui.mainClock.autoAdvance = false
+        try {
+            ui.runOnUiThread { ui.activity.onBackPressedDispatcher.onBackPressed() }
+            ui.mainClock.advanceTimeBy(112)
+            ui.onNodeWithTag("reader-surface").performTouchInput { swipeRight(durationMillis = 240) }
+            ui.mainClock.advanceTimeBy(600)
+        } finally { ui.mainClock.autoAdvance = true }
+        ui.onNodeWithText("ARTICLES").assertIsDisplayed()
+        ui.onNodeWithTag("settings-form").assertDoesNotExist()
+    }
+
+    @Test fun missingKeySettingsReturnsToTheSameNestedWordAndSentence() {
+        ui.onNodeWithTag("article-menu-button").performClick()
+        ui.onNodeWithText("03").performClick()
+        ui.onNodeWithTag("reader-list").performScrollToIndex(1)
+        token("reader-paragraph-0", 0, hold = true)
+        ui.onNodeWithTag("sentence-detail").assertIsDisplayed()
+        val sentenceSettings = ui.onNode(hasText("设置接口") and hasAnyAncestor(hasTestTag("sentence-detail")))
+        sentenceSettings.performScrollTo().performClick()
+        ui.onNodeWithText("MODEL & API").assertIsDisplayed()
+        ui.onNodeWithText("保存并返回").performClick()
+        ui.onNodeWithTag("sentence-detail").assertIsDisplayed()
+        token("sentence-original", 0)
+        val title = ui.onNodeWithTag("word-title").fetchSemanticsNode()
+            .config[androidx.compose.ui.semantics.SemanticsProperties.Text].single().text
+        val wordSettings = ui.onNode(hasText("设置接口") and hasAnyAncestor(hasTestTag("word-detail")))
+        wordSettings.performScrollTo().performClick()
+        ui.onNodeWithText("MODEL & API").assertIsDisplayed()
+        ui.onNodeWithText("保存并返回").performClick()
+        ui.onNodeWithTag("word-title").assertTextEquals(title)
+        ui.runOnUiThread { ui.activity.onBackPressedDispatcher.onBackPressed() }
+        ui.onNodeWithTag("sentence-detail").assertIsDisplayed()
+    }
+
+    @Test fun switchingBanksInvalidatesTheOldDeleteConfirmation() {
+        val learning = LearningStore(store, content)
+        val builtin = content.banks.first().name
+        ui.runOnIdle {
+            val preview = ContentImport.parseText("test.csv", "word,translation\nquartz,石英", true)
+            learning.commitImport(preview, "Audit A")
+            learning.commitImport(preview, "Audit B")
+        }
+        ui.onNodeWithTag("reader-surface").performTouchInput { swipeLeft() }
+        ui.onNodeWithTag("study-menu-button").performClick()
+        ui.onNodeWithText("WORD BANKS").performClick()
+        ui.onNodeWithText("$builtin  ⌄").performClick()
+        ui.onNodeWithText("Audit A").performClick()
+        ui.onNodeWithText("展开词库管理").performScrollTo().performClick()
+        ui.onNodeWithText("删除当前词库").performScrollTo().performClick()
+        ui.onNodeWithText("确认移除「Audit A」").performScrollTo().assertIsDisplayed()
+        ui.onNodeWithText("Audit A  ⌄").performClick()
+        ui.onNodeWithText("Audit B").performClick()
+        ui.onNodeWithText("确认移除", substring = true).assertDoesNotExist()
+        ui.onNodeWithText("删除当前词库").performScrollTo().performClick()
+        ui.onNodeWithText("确认移除「Audit B」").performScrollTo().performClick()
+        ui.runOnIdle { assertEquals(listOf("Audit A"), content.banks.filter { it.name.startsWith("Audit") }.map { it.name }) }
+    }
+
     @Test fun reviewQuestionAndScoreStayStableThroughRotation() {
         ui.onNodeWithTag("reader-surface").performTouchInput { swipeLeft() }
         ui.waitUntil(15_000) { ui.onAllNodesWithText("research").fetchSemanticsNodes().isNotEmpty() }
@@ -229,6 +309,10 @@ class LandscapeLayoutTest {
         ui.onNodeWithText("深色主题").performClick()
         ui.onNodeWithText("沉浸状态栏").performClick()
         ui.onNodeWithText("保存并返回").performClick()
+        ui.runOnIdle {
+            assertFalse(settings.dark)
+            assertFalse(settings.customStatusBar)
+        }
         screenshot("15-reading-light-native")
         ui.onNodeWithText("100%").performClick()
         ui.onNodeWithTag("tasks-detail").assertIsDisplayed(); insideSurface("tasks-detail")

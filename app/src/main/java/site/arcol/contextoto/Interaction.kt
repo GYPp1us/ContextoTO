@@ -9,8 +9,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
@@ -30,6 +32,8 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CoroutineScope
@@ -58,6 +62,94 @@ internal fun FrostedBar(source: GraphicsLayer, colors: Palette, offsetY: Float =
         if (tint > 0f) Box(Modifier.matchParentSize().background(colors.paper.copy(alpha = tint)))
         content()
     }
+}
+
+@Composable
+internal fun DeckHeader(
+    source: GraphicsLayer,
+    colors: Palette,
+    modifier: Modifier = Modifier,
+    top: Dp,
+    statusHeight: Dp,
+    leftInset: Dp,
+    rightInset: Dp,
+    focusStatus: String,
+    onFocus: () -> Unit,
+    progress: @Composable () -> Unit,
+    title: @Composable RowScope.() -> Unit,
+    action: @Composable () -> Unit,
+    returnAction: (@Composable () -> Unit)? = null
+) {
+    val split = LocalReaderViewport.current.split
+    val gutter = LocalReaderViewport.current.gutter.dp
+    val actionWidth = (76f * LocalDensity.current.fontScale.coerceIn(1f, 1.5f)).dp
+    FrostedBar(source, colors, modifier = modifier.fillMaxWidth().quietClickable { }) {
+        Column(Modifier.padding(top = top)) {
+            if (split) {
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = gutter),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, content = title)
+                    FocusStatusLabel(focusStatus, colors, Modifier.width(104.dp), onFocus)
+                    progress()
+                    Box(Modifier.width(actionWidth), contentAlignment = Alignment.CenterEnd) { action() }
+                }
+            } else {
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = statusHeight)
+                        .padding(start = maxOf(gutter, leftInset), end = maxOf(gutter, rightInset)),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    FocusStatusLabel(focusStatus, colors, Modifier.weight(1f), onFocus)
+                    progress()
+                }
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = gutter),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, content = title)
+                    Box(Modifier.width(actionWidth), contentAlignment = Alignment.CenterEnd) { action() }
+                }
+            }
+            returnAction?.let { Box(Modifier.padding(horizontal = gutter)) { it() } }
+        }
+    }
+}
+
+@Composable
+internal fun DeckProgress(
+    label: String, percent: String, colors: Palette, hidden: Boolean,
+    onClick: () -> Unit, onGlyph: (TokenGlyph) -> Unit
+) {
+    val width = (100f * LocalDensity.current.fontScale.coerceIn(1f, 1.75f)).dp
+    Row(Modifier.width(width).quietClickable(onClick = onClick).padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(label, Modifier.weight(1f), color = colors.muted, fontSize = 10.sp,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        StudyWordText(percent, 13f, colors, hidden, onGlyph = onGlyph, ink = colors.word)
+    }
+}
+
+@Composable
+internal fun SidePanelTools(importLabel: String, colors: Palette, onImport: () -> Unit, onGuide: () -> Unit, onSettings: () -> Unit) {
+    val split = LocalReaderViewport.current.split
+    Column(Modifier.fillMaxWidth().padding(horizontal = 25.dp, vertical = 6.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+            JumpLink(importLabel, colors, Modifier.weight(1f, fill = false), onClick = onImport)
+            JumpLink("使用引导", colors, Modifier.weight(1f, fill = false), onClick = onGuide)
+            if (split) JumpLink("接口与外观设置", colors, Modifier.weight(1f, fill = false), bold = true, onClick = onSettings)
+        }
+        if (!split) JumpLink("接口与外观设置", colors, Modifier.fillMaxWidth(), bold = true, onClick = onSettings)
+    }
+}
+
+@Composable
+internal fun LocalWorkProgress(label: String, colors: Palette) {
+    Text(label, color = colors.muted, fontSize = 13.sp, modifier = Modifier.padding(bottom = 10.dp))
+    LinearProgressIndicator(Modifier.fillMaxWidth().height(3.dp), color = colors.word, trackColor = colors.muted.copy(alpha = .22f))
 }
 
 internal fun uiTitle(text: String): String = when (text) {
@@ -128,10 +220,10 @@ internal fun JumpLink(label: String, colors: Palette, modifier: Modifier = Modif
     }
 }
 
-/** Physical page coordinate: settings=-1, directory=-.6, reading=0, words=1, menu=1.6. */
-internal fun deckTarget(position: Float, velocity: Float, bounds: ClosedFloatingPointRange<Float> = -1f..1.6f,
+/** Physical page coordinate: directory=-.6, reading=0, words=1, menu=1.6. */
+internal fun deckTarget(position: Float, velocity: Float, bounds: ClosedFloatingPointRange<Float> = -.6f..1.6f,
                         settingsOnly: Boolean = false, origin: Float? = null): Float {
-    val anchors = if (settingsOnly) listOf(-1f, 0f) else listOf(-1f, -.6f, 0f, 1f, 1.6f)
+    val anchors = if (settingsOnly) listOf(-1f, 0f) else listOf(-.6f, 0f, 1f, 1.6f)
     val candidates = anchors.filter { it in bounds }
     val projected = (position + velocity * .15f).coerceIn(bounds.start, bounds.endInclusive)
     if (origin != null) {
@@ -142,12 +234,11 @@ internal fun deckTarget(position: Float, velocity: Float, bounds: ClosedFloating
     }
     return candidates.minBy { abs(it - projected) }
 }
-internal fun directoryFraction(position: Float): Float =
-    (if (position < -.6f) (position + 1f) / .4f else -position / .6f).coerceIn(0f, 1f)
+internal fun directoryFraction(position: Float): Float = (-position / .6f).coerceIn(0f, 1f)
 internal fun wordMenuFraction(position: Float): Float = ((position - 1f) / .6f).coerceIn(0f, 1f)
 
-internal class DeckMotion(private val scope: CoroutineScope) {
-    val position = Animatable(0f)
+internal class DeckMotion(private val scope: CoroutineScope, initialPosition: Float = 0f) {
+    val position = Animatable(initialPosition)
     val card = Animatable(0f)
     var incoming by mutableStateOf(false)
     var swapping by mutableStateOf(false)

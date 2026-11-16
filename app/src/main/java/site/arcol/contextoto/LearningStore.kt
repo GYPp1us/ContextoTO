@@ -9,6 +9,8 @@ import java.time.Instant
 import java.time.ZoneId
 import java.util.UUID
 
+internal data class ImportResult(val articleIds: List<String>, val wordCount: Int, val bankId: String?)
+
 class LearningStore(private val store: UserStore, private val content: Content) {
     private var poolBanks: List<WordBank>? = null
     private var dictionaryPool = DistractorIndex(emptyList())
@@ -46,20 +48,23 @@ class LearningStore(private val store: UserStore, private val content: Content) 
         } }
         content.refresh(articles, banks, aliases)
     }
-    fun commitImport(preview: ImportPreview, name: String, mergeBank: String? = null): Pair<Int, Int> {
-        var articleCount = 0; var wordCount = 0
+    internal fun commitImport(preview: ImportPreview, name: String, mergeBank: String? = null): ImportResult {
+        val articleIds = mutableListOf<String>()
+        var wordCount = 0
+        var bankId: String? = null
         transaction {
             preview.articles.forEach { article ->
                 if (content.articles.none { Content.sha256(it.paragraphs.joinToString("\n\n")) == Content.sha256(article.paragraphs.joinToString("\n\n")) }) {
                     val values = ContentValues().apply { put("id", article.id); put("created_at", System.currentTimeMillis())
                         put("payload", JSONObject().put("id", article.id).put("title", if (preview.articles.size == 1) name.ifBlank { article.title } else article.title)
                             .put("paragraphs", JSONArray(article.paragraphs)).toString()) }
-                    if (insert("imported_article", values) >= 0) articleCount++
+                    if (insert("imported_article", values) >= 0) articleIds += article.id
                 }
             }
             if (preview.words.isNotEmpty()) {
                 require(mergeBank !in setOf("builtin", "general")) { "预置词库只读，请新建自定义库" }
                 val previous = content.banks.firstOrNull { it.id == mergeBank && it.id !in setOf("builtin", "general") }
+                require(mergeBank == null || previous != null) { "目标词库已不存在，请重新选择" }
                 val id = previous?.id ?: "bank-${UUID.randomUUID()}"
                 val words = (previous?.words?.values.orEmpty() + preview.words).groupBy { it.word }.map { (_, entries) ->
                     entries.last().copy(translation = entries.map { it.translation }.distinct().joinToString(" / "))
@@ -69,11 +74,12 @@ class LearningStore(private val store: UserStore, private val content: Content) 
                     put("payload", JSONArray(words.map { word -> JSONObject().put("word", word.word).put("translation", word.translation)
                         .put("band", word.band).put("exam_freq", word.examFreq).put("rank", word.rank)
                         .put("ipa_uk", word.ipaUk).put("ipa_us", word.ipaUs) }).toString()) }
-                insert("word_bank", values, true)
+                check(insert("word_bank", values, true) >= 0) { "无法保存词库" }
+                bankId = id
             }
         }
         refreshContent(); changed()
-        return articleCount to wordCount
+        return ImportResult(articleIds, wordCount, bankId)
     }
     fun studyWords(): List<StudyWord> = db.rawQuery("SELECT word,archived,memory FROM study_word ORDER BY word COLLATE NOCASE", null).use { cursor ->
         buildList { while (cursor.moveToNext()) add(StudyWord(cursor.getString(0), cursor.getInt(1) != 0, Memory.parse(JSONObject(cursor.getString(2))))) }
@@ -170,7 +176,7 @@ class LearningStore(private val store: UserStore, private val content: Content) 
     fun mergeBank(source: String, destination: String): Int {
         require(source != destination && destination !in setOf("builtin", "general")) { "请选择另一个自定义词库" }
         val from = content.banks.first { it.id == source }; val to = content.banks.first { it.id == destination }
-        return commitImport(ImportPreview(emptyList(), from.words.values.toList(), emptyList(), to.name), to.name, destination).second
+        return commitImport(ImportPreview(emptyList(), from.words.values.toList(), emptyList(), to.name), to.name, destination).wordCount
     }
     fun deleteBank(id: String) {
         require(id !in setOf("builtin", "general")) { "预置词库只读" }

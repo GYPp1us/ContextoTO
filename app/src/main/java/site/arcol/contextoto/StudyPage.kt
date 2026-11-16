@@ -65,13 +65,23 @@ private data class StudyDetail(val word: String, val anchor: TokenGlyph, val que
 internal fun StudyPage(content: Content, learning: LearningStore, engine: AnalysisEngine, provider: Provider,
                        settings: SecureSettings, settingsRevision: Int, colors: Palette,
                        modifier: Modifier, pageOffset: Float, cardScale: Float, cardAlpha: Float, menuFraction: Float,
-                       top: Dp, active: Boolean, menuOpen: Boolean, onMenu: (Boolean) -> Unit,
-                       externalOverlay: Boolean, focusStatus: String, onFocus: () -> Unit, onSettings: () -> Unit,
-                       onImport: () -> Unit, onGuide: () -> Unit, onBusy: (Boolean) -> Unit, cutoutHeight: Dp = 0.dp,
-                       onSwitchMode: (() -> Unit) -> Unit, onSource: (Appearance) -> Unit) {
+                       top: Dp, headerTop: Dp, statusHeight: Dp, leftInset: Dp, rightInset: Dp,
+                       active: Boolean, menuOpen: Boolean, onMenu: (Boolean) -> Unit,
+                       externalOverlay: Boolean, focusStatus: String, onFocus: () -> Unit, onSettings: (SettingsSection) -> Unit,
+                       onImport: () -> Unit, onGuide: () -> Unit, onBusy: (Boolean) -> Unit,
+                       onSwitchMode: (() -> Unit) -> Unit, onSource: (Appearance) -> Unit,
+                       importedBank: String?, onBankOpened: () -> Unit) {
     val epoch by learning.revision.collectAsState()
     val cacheRevision by engine.cacheRevision.collectAsState()
     var mode by remember { mutableStateOf("复习") }
+    var bankId by remember { mutableStateOf("builtin") }
+    LaunchedEffect(importedBank) {
+        if (importedBank != null) {
+            bankId = importedBank
+            mode = "词库"
+            onBankOpened()
+        }
+    }
     var question by remember { mutableStateOf(learning.currentQuestion()) }
     var loading by remember { mutableStateOf(false) }
     var refresh by remember { mutableIntStateOf(0) }
@@ -129,7 +139,7 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
             question = prepared?.let(learning::activateQuestion); prepared = null; refresh++
         }
     }
-    BackHandler(active && (busy || menuOpen)) {
+    BackHandler(active && !externalOverlay && (busy || menuOpen)) {
         when { issueOpen -> issueOpen = false; progressOpen -> progressOpen = false; actionsWord != null -> { actionsWord = null; actionsQuestion = null }; heatDay != null -> heatDay = null
             detail != null -> closeDetail(); else -> onMenu(false) }
     }
@@ -199,37 +209,30 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
         Box(Modifier.fillMaxSize().graphicsLayer {
             translationX = pageOffset; scaleX = cardScale; scaleY = cardScale; alpha = cardAlpha
         }) {
-        Column(Modifier.fillMaxWidth().zIndex(1f).quietClickable { }.onSizeChanged { headerHeight = with(density) { it.height.toDp() } }.graphicsLayer {
-            renderEffect = if (blur > .1f) BlurEffect(blur, blur, TileMode.Clamp) else null
-        }) {
-            FrostedBar(studyLayer, colors, modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(top = top)) {
-            if (viewport.split) Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 24.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-                UiHeading(mode, colors, Modifier.weight(1f), 25)
+        DeckHeader(
+            studyLayer, colors, Modifier.zIndex(1f).onSizeChanged {
+                headerHeight = with(density) { it.height.toDp() }
+            }.graphicsLayer { renderEffect = if (blur > .1f) BlurEffect(blur, blur, TileMode.Clamp) else null },
+            top = headerTop, statusHeight = statusHeight, leftInset = leftInset, rightInset = rightInset,
+            focusStatus = focusStatus, onFocus = onFocus,
+            progress = {
+                DeckProgress(if (task != null) "查询进度" else "今日复习", percent, colors,
+                    percentDestination != null && (progressOpen || percentMotion.value > .001f), onClick = {
+                        percentFlightText = percent
+                        percentFlightSource = percentSource
+                        percentDestination = null
+                        progressOpen = true
+                    }, onGlyph = { percentSource = it })
+            },
+            title = {
+                UiHeading(mode, colors, Modifier.weight(1f), if (viewport.split) 22 else 25)
                 Text("生词 / ${state.count { !it.archived }}", color = colors.muted, fontSize = 11.sp)
-                FocusStatusLabel(focusStatus, colors, onFocus)
-                StudyWordText(percent, 14f, colors, percentDestination != null && (progressOpen || percentMotion.value > .001f),
-                    Modifier.quietClickable { percentFlightText = percent; percentFlightSource = percentSource; percentDestination = null; progressOpen = true }
-                        .padding(vertical = 12.dp), onGlyph = { percentSource = it }, ink = colors.word)
-                Text("≡", Modifier.testTag("study-menu-button").quietClickable { onMenu(true) }.padding(vertical = 8.dp, horizontal = 6.dp), color = colors.ink, fontSize = 25.sp)
-            } else {
-            Row(Modifier.fillMaxWidth().heightIn(min = cutoutHeight.coerceAtLeast(24.dp)).padding(horizontal = 24.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                FocusStatusLabel(focusStatus, colors, onFocus)
-                Spacer(Modifier.weight(1f))
-                StudyWordText(percent, 13f, colors, percentDestination != null && (progressOpen || percentMotion.value > .001f),
-                    Modifier.clickable { percentFlightText = percent; percentFlightSource = percentSource; percentDestination = null; progressOpen = true }.padding(vertical = 8.dp),
-                    onGlyph = { percentSource = it }, ink = colors.word)
+            },
+            action = {
+                Text("≡", Modifier.testTag("study-menu-button").quietClickable { onMenu(true) }
+                    .padding(vertical = 8.dp, horizontal = 6.dp), color = colors.ink, fontSize = 25.sp)
             }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 12.dp, bottom = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-                UiHeading(mode, colors, Modifier.weight(1f), 25)
-                Text("生词  /  ${state.count { !it.archived }}", color = colors.muted, fontSize = 11.sp)
-                Text("≡", Modifier.testTag("study-menu-button").clickable { onMenu(true) }.padding(start = 16.dp), color = colors.ink, fontSize = 25.sp)
-            }
-            }
-            }
-            }
-        }
+        )
         Column(Modifier.fillMaxSize().navigationBarsPadding().graphicsLayer {
             renderEffect = if (blur > .1f) BlurEffect(blur, blur, TileMode.Clamp) else null
         }.drawWithContent { studyLayer.record { this@drawWithContent.drawContent() }; drawLayer(studyLayer) }.padding(horizontal = 24.dp)) {
@@ -254,7 +257,7 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                             Row(Modifier.padding(top = 28.dp), horizontalArrangement = Arrangement.spacedBy(28.dp)) {
                                 JumpLink("选择词库", colors) { mode = "词库" }
                                 if (preparationError != null) JumpLink("重试准备", colors) { refresh++ }
-                                else if (dailyLimitReached) JumpLink("调整复习数量", colors, onClick = onSettings)
+                                else if (dailyLimitReached) JumpLink("调整复习数量", colors) { onSettings(SettingsSection.REVIEW) }
                                 else if (state.isNotEmpty()) JumpLink("开始下一轮", colors) { early = true; roundSeen = emptySet(); refresh++ }
                             }
                         }
@@ -319,7 +322,8 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                         }
                     }
                 }
-                else -> StudyLibraries(content, learning, state, epoch, settings, settingsRevision, headerHeight, colors, Modifier.weight(1f), onImport,
+                else -> StudyLibraries(content, learning, state, epoch, settings, settingsRevision, bankId, { bankId = it },
+                    headerHeight, colors, Modifier.weight(1f), onImport,
                     onDay = { heatDay = it }, onMessage = { message = it })
             }
             if (message.isNotBlank()) Text(message, Modifier.clickable { message = "" }.padding(vertical = 10.dp), color = colors.word, fontSize = 12.sp)
@@ -328,28 +332,31 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
         if (active || menuFraction > .001f) Box(Modifier.fillMaxSize().zIndex(2f)) {
         if (menuFraction > .001f) {
             Box(Modifier.fillMaxSize().background(colors.paper.copy(alpha = GLASS_TINT * menuFraction)).quietClickable { onMenu(false) })
-            DetailColumns(Modifier.align(Alignment.CenterEnd).width(pageWidth * .8f).fillMaxHeight().graphicsLayer {
-                translationX = with(density) { pageWidth.toPx() } * .16f * (1f - menuFraction); alpha = menuFraction
-            }.padding(top = top + if (viewport.compact) 12.dp else 28.dp).navigationBarsPadding().padding(horizontal = 30.dp),
-                header = { UiHeading("WORDS", colors, Modifier.padding(bottom = 20.dp), 25) }, leading = {
-                Column(verticalArrangement = Arrangement.spacedBy(if (viewport.compact) 8.dp else 28.dp)) {
-                listOf("复习", "列表", "词库").forEachIndexed { i, item -> Box(Modifier.graphicsLayer {
-                    val amount = ((menuFraction - i * .08f) / (1f - i * .08f)).coerceIn(0f, 1f)
-                    alpha = amount; translationY = -8.dp.toPx() * (1f - amount)
-                }) {
-                    Text(uiSmallCaps(uiTitle(item), 23f), Modifier.fillMaxWidth().quietClickable {
-                        if (mode == item) onMenu(false) else onSwitchMode { mode = item }
-                    }.padding(vertical = 12.dp),
-                        color = if (mode == item) colors.word else colors.ink, fontSize = 23.sp, fontFamily = ReadingFont, fontWeight = FontWeight.Bold)
-                } }
+            Box(Modifier.align(Alignment.CenterEnd).width(pageWidth * .8f).fillMaxHeight().graphicsLayer {
+                translationX = with(density) { pageWidth.toPx() } * .16f * (1f - menuFraction)
+                alpha = menuFraction
+            }.padding(top = top).navigationBarsPadding()) {
+                var toolsHeight by remember { mutableStateOf(112.dp) }
+                Column(Modifier.fillMaxSize().padding(bottom = toolsHeight).verticalScroll(rememberScrollState())
+                    .padding(horizontal = 25.dp, vertical = if (viewport.compact) 12.dp else 30.dp)) {
+                    UiHeading("WORDS", colors, Modifier.padding(bottom = 12.dp))
+                    listOf("复习", "列表", "词库").forEach { item ->
+                        Text(uiSmallCaps(uiTitle(item), 23f), Modifier.fillMaxWidth().quietClickable {
+                            if (mode == item) onMenu(false) else onSwitchMode { mode = item }
+                        }.padding(vertical = if (viewport.compact) 9.dp else 14.dp),
+                            color = if (mode == item) colors.word else colors.ink,
+                            fontSize = 23.sp, fontFamily = ReadingFont, fontWeight = FontWeight.Bold)
+                    }
                 }
-            }, trailing = {
-                Column(verticalArrangement = Arrangement.spacedBy(if (viewport.compact) 12.dp else 28.dp)) {
-                JumpLink("导入词库", colors) { onMenu(false); onImport() }
-                JumpLink("使用引导", colors) { onMenu(false); onGuide() }
-                JumpLink("设置", colors) { onMenu(false); onSettings() }
+                Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().onSizeChanged {
+                    toolsHeight = with(density) { it.height.toDp() }
+                }.graphicsLayer { alpha = ((menuFraction - .2f) / .8f).coerceIn(0f, 1f) }) {
+                    SidePanelTools("导入词库", colors,
+                        onImport = { onMenu(false); onImport() },
+                        onGuide = { onMenu(false); onGuide() },
+                        onSettings = { onSettings(SettingsSection.GENERAL) })
                 }
-            })
+            }
         }
         val displayed = detail ?: lastDetail
         if (detail != null || motion.value > .001f) {
@@ -369,7 +376,7 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                 val result = remember(displayed.word, cacheRevision) { engine.cachedLexeme(displayed.word) }
                 WordSheet(WordTarget(0, token, displayed.anchor, false), fake, content, result, null, null, colors,
                     pageWidth, pageHeight, top, if (displayed.question != null && detail == null) 1f else if (detail != null && detail != lastDetail) 0f else motion.value,
-                    onTitleGeometry = { destination = it }, onRetry = {}, onConfigure = onSettings,
+                    onTitleGeometry = { destination = it }, onRetry = {}, onConfigure = { onSettings(SettingsSection.MODEL) },
                     onAction = if (displayed.question != null) ({ issueOpen = true }) else null,
                     heading = if (displayed.question != null) "REVIEW / ANSWER" else "WORD / COLLECTION", allowQueries = false,
                     onBlankTap = if (displayed.question != null) ({ closeDetail() }) else null,
@@ -387,7 +394,7 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
                         } }
                     }, afterContent = {
                         if (provider.key.isBlank() && learning.meanings(displayed.word).isEmpty()) JumpLink("词元模块待补齐 · 设置接口", colors,
-                            Modifier.padding(vertical = 15.dp), onClick = onSettings)
+                            Modifier.padding(vertical = 15.dp)) { onSettings(SettingsSection.MODEL) }
                         if (provider.key.isNotBlank()) {
                             if (supplementProgress != null) ProgressBlock(supplementProgress, colors, "补齐词元模块")
                             else JumpLink("补齐音标 / 通用义 / 派生词", colors, Modifier.padding(vertical = 15.dp)) {
@@ -462,11 +469,19 @@ internal fun StudyPage(content: Content, learning: LearningStore, engine: Analys
 @Composable
 private fun ReviewLayout(modifier: Modifier, word: @Composable () -> Unit, answers: @Composable ColumnScope.() -> Unit) {
     val viewport = LocalReaderViewport.current
-    if (viewport.split) Row(modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(viewport.gap.dp)) {
-        Box(Modifier.weight(.38f).fillMaxHeight(), contentAlignment = Alignment.CenterStart) {
-            Column(Modifier.verticalScroll(rememberScrollState())) { word() }
+    if (viewport.split) {
+        BoxWithConstraints(modifier.padding(top = 12.dp)) {
+            val availableHeight = with(LocalDensity.current) { maxHeight.roundToPx() }
+            var answerHeight by remember { mutableIntStateOf(0) }
+            Row(
+                Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(viewport.gap.dp),
+                verticalAlignment = if (answerHeight > availableHeight) Alignment.Top else Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(DETAIL_PRIMARY_WEIGHT).verticalScroll(rememberScrollState())) { word() }
+                Column(Modifier.weight(1f - DETAIL_PRIMARY_WEIGHT).verticalScroll(rememberScrollState())
+                    .onSizeChanged { answerHeight = it.height }, content = answers)
+            }
         }
-        Column(Modifier.weight(.62f).fillMaxHeight().verticalScroll(rememberScrollState()), content = answers)
     } else Column(modifier.verticalScroll(rememberScrollState()).padding(top = 24.dp)) { word(); answers() }
 }
 
@@ -558,9 +573,10 @@ private fun OccurrenceDetails(word: String, content: Content, learning: Learning
 
 @Composable
 private fun StudyLibraries(content: Content, learning: LearningStore, state: List<StudyWord>, epoch: Int,
-                           settings: SecureSettings, settingsRevision: Int, headerHeight: Dp, colors: Palette,
+                           settings: SecureSettings, settingsRevision: Int, selected: String, onSelect: (String) -> Unit,
+                           headerHeight: Dp, colors: Palette,
                            modifier: Modifier, onImport: () -> Unit, onDay: (String) -> Unit, onMessage: (String) -> Unit) {
-    var selected by remember { mutableStateOf("builtin") }; var choosing by remember { mutableStateOf(false) }
+    var choosing by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val importCount = remember(settingsRevision) { settings.randomImportCount }
@@ -574,7 +590,7 @@ private fun StudyLibraries(content: Content, learning: LearningStore, state: Lis
         Text(bank.name + "  ⌄", Modifier.fillMaxWidth().clickable { choosing = !choosing }.padding(vertical = 15.dp), color = colors.ink,
             fontFamily = FontFamily.Serif, fontSize = 22.sp)
         RetainedFoldout(choosing, "banks") { Column { content.banks.forEachIndexed { i, option -> RevealElement(i, option.id) {
-            Text(option.name, Modifier.fillMaxWidth().clickable { selected = option.id; choosing = false }.padding(vertical = 12.dp), color = colors.word, fontSize = 14.sp)
+            Text(option.name, Modifier.fillMaxWidth().clickable { onSelect(option.id); choosing = false }.padding(vertical = 12.dp), color = colors.word, fontSize = 14.sp)
         } } } }
         Text("${bank.words.size} 个词元", color = colors.muted, fontSize = 11.sp)
         JumpLink(if (importing) "正在加入…" else "随机加入 $importCount 个词", colors,

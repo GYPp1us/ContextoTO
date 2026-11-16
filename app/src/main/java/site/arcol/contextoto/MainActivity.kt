@@ -62,6 +62,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -156,7 +157,7 @@ private fun palette(dark: Boolean) = if (dark) Palette(
     Color(0xFF9FBEAF), Color(0xFFD2A18C), Color(0xFFB9A7CA), Color(0xFFD6BF91)
 ) else Palette(
     Color(0xFFF2F0EA), Color(0xFF262B29), Color(0xFF66716E), Color(0x55E6E8E4), Color(0xAAE9ECE8),
-    Color(0xFF5D7B72), Color(0xFFA87562), Color(0xFF897999), Color(0xFFA48656)
+    Color(0xFF496B60), Color(0xFF895341), Color(0xFF897999), Color(0xFFA48656)
 )
 
 internal data class GlyphCharacter(val text: String, val rect: Rect, val baseline: Float, val sizePx: Float, val color: Color,
@@ -202,9 +203,11 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
     val learning = remember { LearningStore(store, content) }
     val deckScope = rememberCoroutineScope()
     val deck = remember { DeckMotion(deckScope) }
+    val settingsMotion = remember { DeckMotion(deckScope, initialPosition = -1f) }
     var wordPage by remember { mutableStateOf(false) }
     var wordMenu by remember { mutableStateOf(false) }
     var studyBusy by remember { mutableStateOf(false) }
+    var importedBank by remember { mutableStateOf<String?>(null) }
     var importKind by remember { mutableStateOf<Boolean?>(null) }
     var focusOpen by remember { mutableStateOf(false) }
     var guideStep by remember { mutableIntStateOf(if (settings.guideStep >= 0) settings.guideStep else if (store.getPlace() != null) 3 else 0) }
@@ -268,23 +271,39 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
     var provider by remember { mutableStateOf(settings.provider()) }
     var drawerOpen by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
-    var settingsRetained by remember { mutableStateOf(false) }
-    var directoryRetiring by remember { mutableStateOf(false) }
+    var settingsSection by remember { mutableStateOf(SettingsSection.GENERAL) }
+    var settingsVisit by remember { mutableIntStateOf(0) }
+    var settingsDirty by remember { mutableStateOf(false) }
+    var confirmDiscard by remember { mutableStateOf(false) }
     var cutoutFactor by remember { mutableStateOf(settings.cutoutFactor) }
     var learningSettingsRevision by remember { mutableIntStateOf(0) }
-    LaunchedEffect(wordPage, drawerOpen, wordMenu, settingsOpen) {
-        deck.settle(when { settingsOpen -> -1f; drawerOpen -> -.6f; wordMenu -> 1.6f; wordPage -> 1f; else -> 0f })
+    LaunchedEffect(wordPage, drawerOpen, wordMenu) {
+        deck.settle(when { drawerOpen -> -.6f; wordMenu -> 1.6f; wordPage -> 1f; else -> 0f })
     }
-    LaunchedEffect(settingsOpen, deck.position.value) {
-        if (settingsOpen || deck.position.value < -.6001f) settingsRetained = true
-        else if (deck.position.value >= -.001f) settingsRetained = false
-        if (deck.position.value <= -.999f) directoryRetiring = false
-    }
-    LaunchedEffect(settingsOpen) { if (settingsOpen) { wordPage = false; wordMenu = false; drawerOpen = false } }
     fun selectDeck(target: Float) {
-        settingsOpen = target == -1f; drawerOpen = target == -.6f; wordMenu = target == 1.6f
+        drawerOpen = target == -.6f; wordMenu = target == 1.6f
         wordPage = target >= 1f
         deck.settle(target)
+    }
+    fun openSettings(section: SettingsSection = SettingsSection.GENERAL) {
+        if (settingsOpen) return
+        settingsSection = section
+        settingsVisit++
+        settingsDirty = false
+        settingsOpen = true
+        if (drawerOpen || wordMenu) selectDeck(if (wordPage) 1f else 0f)
+        settingsMotion.settle(0f)
+    }
+    fun closeSettings() {
+        confirmDiscard = false
+        settingsOpen = false
+        settingsMotion.settle(-1f)
+    }
+    fun requestSettingsBack() {
+        if (settingsDirty) {
+            confirmDiscard = true
+            settingsMotion.settle(0f)
+        } else closeSettings()
     }
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
     var updateStatus by remember { mutableStateOf("点击检查 GitHub 最新版本") }
@@ -337,7 +356,6 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
     var percentAnchor by remember { mutableStateOf<TokenGlyph?>(null) }
     var flightAnchor by remember { mutableStateOf<TokenGlyph?>(null) }
     var flightPercent by remember { mutableStateOf(percentLabel) }
-    var percentSourceLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
     var percentDestination by remember { mutableStateOf<TokenGlyph?>(null) }
     val percentMotion = remember { Animatable(0f) }
     var lastSentence by remember { mutableStateOf<SentenceTarget?>(null) }
@@ -452,12 +470,14 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
     }
     fun closeTop() {
         when {
+            updateOpen -> closeUpdate()
+            analysisTransferOpen -> analysisTransferOpen = false
+            confirmDiscard -> confirmDiscard = false
+            settingsOpen -> requestSettingsBack()
             regenerate != null -> regenerate = null
             importKind != null -> importKind = null
             guideStep < 4 -> { guideStep = 4; settings.guideStep = 4 }
             focusOpen -> focusOpen = false
-            updateOpen -> closeUpdate()
-            settingsOpen -> settingsOpen = false
             silentOpen -> {
                 flightPercent = percentLabel
                 flightAnchor = percentAnchor
@@ -468,10 +488,10 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
             drawerOpen -> drawerOpen = false
             wordMenu -> wordMenu = false
             wordPage -> wordPage = false
-            reviewReturn -> { wordPage = true; reviewReturn = false }
+            reviewReturn -> { selectDeck(1f); reviewReturn = false }
         }
     }
-    BackHandler(updateOpen || settingsOpen || silentOpen || wordTarget != null || sentenceOpen != null || drawerOpen ||
+    BackHandler(updateOpen || analysisTransferOpen || settingsOpen || silentOpen || wordTarget != null || sentenceOpen != null || drawerOpen ||
         importKind != null || focusOpen || regenerate != null || guideStep < 4 || wordPage || reviewReturn) { closeTop() }
 
     LaunchedEffect(article.id, listState) {
@@ -481,12 +501,12 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
             position?.let { (item, offset) -> store.savePlace(article.id, item, offset) }
             }
     }
-    LaunchedEffect(focusUrl, focusSubjectId, focusItemId, appResumed, drawerOpen, wordMenu, settingsOpen, updateOpen, importKind, guideStep) {
+    LaunchedEffect(focusUrl, focusSubjectId, focusItemId, appResumed, drawerOpen, wordPage, settingsOpen, updateOpen, importKind, guideStep) {
         if (focusUrl.isBlank() || focusSubjectId <= 0 || focusItemId <= 0) {
             focusStatus = "未配置专注上报"
             return@LaunchedEffect
         }
-        if (!appResumed || drawerOpen || wordMenu || settingsOpen || updateOpen || importKind != null || guideStep < 4) {
+        if (!appResumed || drawerOpen || wordPage || settingsOpen || updateOpen || importKind != null || guideStep < 4) {
             focusStatus = "阅读暂停 · 已停止上报"
             return@LaunchedEffect
         }
@@ -585,8 +605,7 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
     val modalOverlay = hasOverlay && !drawerOpen && !wordMenu && !settingsOpen ||
         silentOpen || sentenceOpen != null || wordTarget != null || studyBusy || importKind != null || focusOpen || guideStep < 4 || regenerate != null || updateOpen || analysisTransferOpen
     val popupBlur by animateFloatAsState(if (modalOverlay) GLASS_BLUR else 0f, tween(290, easing = FastOutSlowInEasing), label = "body blur")
-    val directoryProgress = if ((settingsOpen && !directoryRetiring) || (settingsRetained && !settingsOpen)) 0f
-        else directoryFraction(deck.position.value)
+    val directoryProgress = directoryFraction(deck.position.value)
     val menuProgress = wordMenuFraction(deck.position.value)
     val blur = maxOf(popupBlur, GLASS_BLUR * maxOf(directoryProgress, menuProgress))
     val updateBlur by animateFloatAsState(if (updateOpen || analysisTransferOpen) GLASS_BLUR else 0f,
@@ -595,6 +614,7 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
         tween(240, easing = FastOutSlowInEasing), label = "regeneration menu blur")
     val currentWordMotion = if (wordTarget != null && wordTarget != lastWord) 0f else wordMotion.value
     val currentSentenceMotion = if (sentenceOpen != null && sentenceOpen != lastSentence) 0f else sentenceMotion.value
+    val dragBlocked = if (settingsOpen) confirmDiscard || updateOpen || analysisTransferOpen else modalOverlay
 
     LaunchedEffect(article.id, sourceJump) {
         sourceJump?.takeIf { it.articleId == article.id }?.let { occurrence ->
@@ -611,17 +631,17 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
         .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom))
         .testTag("reader-surface")
         .onGloballyPositioned { surfaceOrigin = it.positionInRoot() }
-        .clipToBounds().pointerInput(modalOverlay) {
+        .clipToBounds().pointerInput(dragBlocked, settingsOpen) {
         val tracker = VelocityTracker()
         var lastDragPosition = Offset.Zero
         var dragBounds: ClosedFloatingPointRange<Float> = -.6f..1f
-        var returningFromSettings = false
         var dragOrigin = 0f
+        val settingsDrag = settingsOpen
+        val motion = if (settingsDrag) settingsMotion else deck
         detectHorizontalDragGestures(onDragStart = { start ->
-            dragOrigin = deck.position.value
-            returningFromSettings = settingsOpen || deck.position.value < -.61f
+            dragOrigin = motion.position.value
             dragBounds = when {
-                returningFromSettings -> -1f..0f
+                settingsDrag -> -1f..0f
                 drawerOpen || deck.position.value < -.1f -> -.6f..0f
                 wordMenu || deck.position.value > 1.1f -> 1f..1.6f
                 wordPage || deck.position.value > .5f -> 0f..1.6f
@@ -629,19 +649,31 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
             }
             tracker.resetTracking(); lastDragPosition = start
             tracker.addPosition(android.os.SystemClock.uptimeMillis(), start)
-            if (!modalOverlay) deckScope.launch(start = CoroutineStart.UNDISPATCHED) { deck.startDrag() }
+            if (!dragBlocked) deckScope.launch(start = CoroutineStart.UNDISPATCHED) { motion.startDrag() }
         }, onHorizontalDrag = { change, delta ->
-            if (!modalOverlay && !deck.swapping) {
+            if (!dragBlocked && !motion.swapping) {
                 change.consume(); lastDragPosition = change.position
                 tracker.addPosition(change.uptimeMillis, change.position)
-                deckScope.launch(start = CoroutineStart.UNDISPATCHED) { deck.drag(-delta / size.width, dragBounds) }
+                val distance = (if (settingsDrag) delta else -delta) / size.width
+                deckScope.launch(start = CoroutineStart.UNDISPATCHED) { motion.drag(distance, dragBounds) }
             }
-        }, onDragCancel = { if (!modalOverlay) selectDeck(deckTarget(deck.position.value, 0f, dragBounds, returningFromSettings)) },
+        }, onDragCancel = {
+            if (!dragBlocked && settingsDrag == settingsOpen) {
+                if (settingsDrag) settingsMotion.settle(0f)
+                else selectDeck(deckTarget(deck.position.value, 0f, dragBounds))
+            }
+        },
             onDragEnd = {
                 // A held finger has no recent MOVE events. Include release time so
                 // a pause is not mistaken for the velocity of the previous move.
                 tracker.addPosition(android.os.SystemClock.uptimeMillis(), lastDragPosition)
-                if (!modalOverlay && !deck.swapping) selectDeck(deckTarget(deck.position.value, -tracker.calculateVelocity().x / size.width, dragBounds, returningFromSettings, dragOrigin))
+                if (!dragBlocked && !motion.swapping && settingsDrag == settingsOpen) {
+                    val velocity = tracker.calculateVelocity().x / size.width
+                    if (settingsDrag) {
+                        if (deckTarget(motion.position.value, velocity, dragBounds, settingsOnly = true, origin = 0f) < 0f) requestSettingsBack()
+                        else settingsMotion.settle(0f)
+                    } else selectDeck(deckTarget(motion.position.value, -velocity, dragBounds, origin = dragOrigin))
+                }
             })
     }) {
         val width = maxWidth
@@ -656,13 +688,14 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
             if (wordTarget != null) wordMotion.snapTo(1f)
             if (sentenceOpen != null) sentenceMotion.snapTo(1f)
             if (silentOpen) percentMotion.snapTo(1f)
-            deck.settle(when { settingsOpen -> -1f; drawerOpen -> -.6f; wordMenu -> 1.6f; wordPage -> 1f; else -> 0f }, 0)
+            deck.settle(when { drawerOpen -> -.6f; wordMenu -> 1.6f; wordPage -> 1f; else -> 0f }, 0)
         }
         val safeTop = with(density) { WindowInsets.safeDrawing.getTop(this).toDp() }
         val physicalCutoutTop = with(density) { WindowInsets.displayCutout.getTop(this).toDp() }
         val topReserve = if (customStatusBar) (if (viewport.compact) physicalCutoutTop + 4.dp else 6.dp)
             else if (viewport.compact) safeTop + 4.dp
             else safeTop + with(density) { (scale.bodySize * scale.lineFactor * .8f).sp.toDp() }
+        val headerTop = if (customStatusBar) topReserve else safeTop + 4.dp
         val cutoutTop = physicalCutoutTop * cutoutFactor
         val statusHeight = maxOf(cutoutTop, 42.dp * cutoutFactor)
         val topCutout = if (customStatusBar && !viewport.compact) {
@@ -724,93 +757,43 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
             scaleX = cardScale; scaleY = cardScale; alpha = 1f - deck.card.value
             renderEffect = if (blur > 0.1f) BlurEffect(blur, blur, TileMode.Clamp) else null
         }) {
-            Column(Modifier.fillMaxWidth().zIndex(1f).quietClickable { }.testTag("reader-header").onSizeChanged { readingHeader = with(density) { it.height.toDp() } }) {
-                FrostedBar(readingLayer, colors, modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(top = topReserve)) {
-                if (viewport.split) {
-                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = readingMargin.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        Text("≡", Modifier.testTag("article-menu-button").quietClickable { drawerOpen = true }.padding(vertical = 8.dp, horizontal = 6.dp),
-                            color = colors.ink, fontSize = 25.sp)
-                        Text(smallCapsTitle(article.title, 17f), Modifier.weight(1f), color = colors.ink,
-                            fontFamily = ReadingFont, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(article.id.uppercase().take(8), color = colors.muted, fontSize = 11.sp)
-                        if (customStatusBar) Text(clockLabel, color = colors.muted, fontSize = 11.sp)
-                        FocusStatusLabel(focusStatus, colors) { focusOpen = true }
-                        StudyWordText(percentLabel, 14f, colors, percentDestination != null && (silentOpen || percentMotion.value > .001f),
-                            Modifier.quietClickable {
-                                flightPercent = percentLabel; flightAnchor = percentAnchor; percentDestination = null; silentOpen = true
-                            }.padding(vertical = 12.dp), onGlyph = { percentAnchor = it }, ink = colors.word)
-                        JumpLink("书签", colors, size = 11) { readerScope.launch {
-                            val layout = paragraphLayouts[bookmarkPlace.paragraph]
-                            val lineTop = layout?.getLineTop(layout.getLineForOffset(bookmarkPlace.sentenceStart))?.roundToInt() ?: 0
-                            listState.animateScrollToItem(bookmarkPlace.paragraph + 1, lineTop)
-                        } }
-                    }
-                } else {
-                Row(Modifier.fillMaxWidth().heightIn(min = if (customStatusBar) statusHeight else 42.dp)
-                    .padding(start = maxOf(readingMargin.dp, leftEdge), end = maxOf(readingMargin.dp, rightEdge),
-                        top = if (customStatusBar) 2.dp else 22.dp, bottom = if (customStatusBar) 2.dp else 18.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    if (customStatusBar) {
-                        FocusStatusLabel(focusStatus, colors) { focusOpen = true }
-                        Spacer(Modifier.weight(1f))
-                    } else {
-                        Text("≡", Modifier.testTag("article-menu-button").clickable { drawerOpen = true }.padding(end = 18.dp), color = colors.ink, fontSize = 27.sp)
-                        Text("ContextoTO", color = colors.ink, fontFamily = ReadingFont, fontSize = 19.sp)
-                        Spacer(Modifier.weight(1f))
-                        Text(article.id.uppercase(), color = colors.muted, fontSize = 12.sp, fontFamily = ReadingFont)
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Box(Modifier.width(58.dp).height(if (customStatusBar) statusHeight else 42.dp).clickable {
-                        flightPercent = percentLabel
-                        flightAnchor = percentAnchor
-                        percentDestination = null
-                        silentOpen = true
-                    }, contentAlignment = Alignment.CenterEnd) {
-                    Text(percentLabel, Modifier.graphicsLayer { alpha = if (percentDestination != null &&
-                        (silentOpen || percentMotion.value > .001f)) 0f else 1f }
-                        .onGloballyPositioned { coordinates ->
-                            val layout = percentSourceLayout ?: return@onGloballyPositioned
-                            val measured = layout.layoutInput.text.text
-                            if (measured.isEmpty()) return@onGloballyPositioned
-                            val position = coordinates.positionInRoot()
-                            val first = layout.getBoundingBox(0)
-                            val last = layout.getBoundingBox(measured.lastIndex)
-                            percentAnchor = TokenGlyph(Token(measured, 0, measured.length),
-                                Rect(position.x + first.left, position.y + first.top,
-                                    position.x + last.right, position.y + first.bottom),
-                                position.y + layout.getLineBaseline(0), with(density) { 12.sp.toPx() }, colors.word)
-                        }, onTextLayout = { percentSourceLayout = it }, color = colors.word,
-                        fontFamily = ReadingFont, fontSize = 12.sp)
-                    }
-                }
-                Row(Modifier.fillMaxWidth().padding(horizontal = readingMargin.dp).padding(bottom = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    if (!customStatusBar) FocusStatusLabel(focusStatus, colors) { focusOpen = true }
-                    if (customStatusBar) {
-                        Text("≡", Modifier.testTag("article-menu-button").clickable { drawerOpen = true }.padding(end = 12.dp), color = colors.ink, fontSize = 23.sp)
-                        Text(smallCapsTitle(article.title, 16f), color = colors.ink, fontFamily = ReadingFont,
-                            fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                        Text(article.id.uppercase().take(8), color = colors.muted, fontSize = 11.sp, modifier = Modifier.padding(start = 8.dp))
-                    }
-                    if (!customStatusBar) Spacer(Modifier.weight(1f))
-                    if (!customStatusBar) Text(if (activeQuery != null) "查询进度（估算）" else "句子缓存", color = colors.muted, fontSize = 10.sp)
-                    Spacer(Modifier.width(16.dp))
-                    val bookmarkNumber = articleSentences.firstOrNull { it.paragraphIndex == bookmarkPlace.paragraph &&
-                        it.sentence.start == bookmarkPlace.sentenceStart }?.number ?: 1
-                    Text("书签 · ${bookmarkNumber}句", Modifier.clickable {
+            val bookmarkNumber = articleSentences.firstOrNull { it.paragraphIndex == bookmarkPlace.paragraph &&
+                it.sentence.start == bookmarkPlace.sentenceStart }?.number ?: 1
+            DeckHeader(
+                readingLayer, colors, Modifier.zIndex(1f).testTag("reader-header").onSizeChanged {
+                    readingHeader = with(density) { it.height.toDp() }
+                },
+                top = headerTop, statusHeight = statusHeight, leftInset = leftEdge, rightInset = rightEdge,
+                focusStatus = focusStatus, onFocus = { focusOpen = true },
+                progress = {
+                    DeckProgress(if (activeQuery != null) "查询进度" else "句子缓存", percentLabel, colors,
+                        percentDestination != null && (silentOpen || percentMotion.value > .001f), onClick = {
+                            flightPercent = percentLabel
+                            flightAnchor = percentAnchor
+                            percentDestination = null
+                            silentOpen = true
+                        }, onGlyph = { percentAnchor = it })
+                },
+                title = {
+                    Text("≡", Modifier.testTag("article-menu-button").quietClickable { drawerOpen = true }
+                        .padding(end = 12.dp), color = colors.ink, fontSize = 25.sp)
+                    Text(smallCapsTitle(article.title, 17f), Modifier.weight(1f), color = colors.ink,
+                        fontFamily = ReadingFont, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(article.id.uppercase().take(8), Modifier.padding(start = 8.dp), color = colors.muted, fontSize = 11.sp)
+                    if (viewport.split && customStatusBar) Text(clockLabel, Modifier.padding(start = 12.dp),
+                        color = colors.muted, fontSize = 11.sp)
+                },
+                action = {
+                    Text("书签 · ${bookmarkNumber}句", Modifier.quietClickable {
                         readerScope.launch {
                             val layout = paragraphLayouts[bookmarkPlace.paragraph]
                             val top = layout?.getLineTop(layout.getLineForOffset(bookmarkPlace.sentenceStart))?.roundToInt() ?: 0
                             listState.animateScrollToItem(bookmarkPlace.paragraph + 1, top)
                         }
-                    }, color = colors.word, fontSize = 10.sp)
-                }
-                }
-                }
-                }
-            }
+                    }.padding(vertical = 10.dp), color = colors.word, fontSize = 10.sp)
+                },
+                returnAction = if (reviewReturn) ({ JumpLink("返回生词详情", colors, onClick = ::closeTop) }) else null
+            )
                 Box(Modifier.fillMaxSize().navigationBarsPadding().clipToBounds().drawWithContent {
                     readingLayer.record { this@drawWithContent.drawContent() }; drawLayer(readingLayer)
                 }) {
@@ -887,18 +870,26 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
         }
         StudyPage(content, learning, engine, provider, settings, learningSettingsRevision, colors, Modifier.fillMaxSize(),
             with(density) { width.toPx() } - pageShift + cardOffset, cardScale, 1f - deck.card.value, menuProgress,
-            if (customStatusBar) topReserve else safeTop, wordPage, wordMenu, { wordMenu = it },
-            settingsOpen || importKind != null || guideStep < 4 || focusOpen, focusStatus, { focusOpen = true },
-            { wordMenu = false; settingsOpen = true }, { importKind = true }, { guideStep = 0; settings.guideStep = 0 }, { studyBusy = it }, statusHeight,
+            top = topReserve, headerTop = headerTop, statusHeight = statusHeight, leftInset = leftEdge, rightInset = rightEdge,
+            active = wordPage, menuOpen = wordMenu, onMenu = { wordMenu = it },
+            externalOverlay = settingsOpen || importKind != null || guideStep < 4 || focusOpen,
+            focusStatus = focusStatus, onFocus = { focusOpen = true }, onSettings = ::openSettings,
+            onImport = { importKind = true }, onGuide = { guideStep = 0; settings.guideStep = 0 }, onBusy = { studyBusy = it },
             onSwitchMode = { change -> deck.exchange(1f, change) { wordMenu = false } },
             onSource = { occurrence ->
                 val index = content.articles.indexOfFirst { it.id == occurrence.articleId }
-                if (index >= 0) { articleIndex = index; sourceJump = occurrence; wordPage = false; reviewReturn = true }
-            })
+                if (index >= 0) {
+                    articleIndex = index
+                    sourceJump = occurrence
+                    selectDeck(0f)
+                    reviewReturn = true
+                }
+            },
+            importedBank = importedBank, onBankOpened = { importedBank = null })
         if (directoryProgress > .001f) {
             Box(Modifier.fillMaxSize().background(colors.paper.copy(alpha = GLASS_TINT * directoryProgress)).quietClickable { selectDeck(0f) })
             ArticleDrawer(content, store, article.id, lookupEpoch + engineRevision, colors,
-                Modifier.width(width * .80f).fillMaxHeight().zIndex(if (settingsOpen) .5f else 0f).graphicsLayer {
+                Modifier.width(width * .80f).fillMaxHeight().graphicsLayer {
                     translationX = with(density) { width.toPx() } * -.16f * (1f - directoryProgress)
                     alpha = directoryProgress
                 }.navigationBarsPadding().padding(top = topReserve),
@@ -907,7 +898,7 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
                         articleIndex = index; wordTarget = null; sentenceOpen = null
                         store.savePlace(content.articles[index].id, 0, 0)
                     }) { drawerOpen = false }
-                }, onSettings = { directoryRetiring = true; drawerOpen = false; settingsOpen = true },
+                }, onSettings = { openSettings() },
                 onImport = { drawerOpen = false; importKind = false }, onGuide = { drawerOpen = false; guideStep = 0; settings.guideStep = 0 })
         }
 
@@ -936,7 +927,8 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
                             wordDestination = null
                             wordTarget = WordTarget(activeSentence.paragraphIndex, absolute,
                                 anchor.copy(token = absolute), true)
-                        }, onRetry = { retrySentence++ }, onAction = { regenerate = "sentence" })
+                         }, onRetry = { retrySentence++ }, onConfigure = { openSettings(SettingsSection.MODEL) },
+                         onAction = { regenerate = "sentence" }, canRetry = provider.key.isNotBlank())
                 }
             }
         }
@@ -947,9 +939,8 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
             enter = fadeIn(tween(160)), exit = fadeOut(tween(310))) {
             if (displayWord != null) WordSheet(displayWord, article, content, wordResult, wordProgress, wordError, colors,
                 maxWidth, maxHeight, topReserve, currentWordMotion, onTitleGeometry = { wordDestination = it },
-                onRetry = { retryWord++ }, onConfigure = {
-                    wordTarget = null; sentenceOpen = null; settingsOpen = true
-                }, onAction = { regenerate = "word" })
+                 onRetry = { retryWord++ }, onConfigure = { openSettings(SettingsSection.MODEL) },
+                 onAction = { regenerate = "word" }, canRetry = provider.key.isNotBlank())
         }
 
         val flightSentence = sentenceOpen ?: lastSentence
@@ -977,7 +968,8 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
                 provider.key.isNotBlank(), queryTasks,
                 if (percentMotion.value < 1f) flightPercent else percentLabel,
                 colors, maxWidth, maxHeight, topReserve, percentMotion.value,
-                onPercentGeometry = { percentDestination = it }, onRetry = { retrySilent++ })
+                 onPercentGeometry = { percentDestination = it }, onRetry = { retrySilent++ },
+                 onConfigure = { openSettings(SettingsSection.MODEL) })
         }
         if (flightAnchor != null && percentDestination != null) {
             MotionGlyphs(listOf(percentAnchor ?: flightAnchor!!), listOf(percentDestination!!), percentMotion.value, silentOpen)
@@ -1001,26 +993,40 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
         if (focusOpen) {
             GlassScrim(colors) { focusOpen = false }
             SimpleChoiceSheet("Focus / $clockLabel", colors, topReserve, 40.dp, listOf(focusStatus, "上报设置 →")) {
-                if (it == "上报设置 →") { focusOpen = false; settingsOpen = true }
+                if (it == "上报设置 →") { focusOpen = false; openSettings(SettingsSection.FOCUS) }
             }
         }
-        importKind?.let { vocabulary -> ImportOverlay(vocabulary, content, learning, colors, topReserve) { importKind = null } }
+        importKind?.let { vocabulary ->
+            ImportOverlay(vocabulary, content, learning, colors, topReserve, onClose = { importKind = null },
+                onOpenArticle = { id ->
+                    val index = content.articles.indexOfFirst { it.id == id }
+                    if (index >= 0) {
+                        articleIndex = index
+                        store.savePlace(id, 0, 0)
+                        importKind = null
+                        selectDeck(0f)
+                    }
+                },
+                onOpenBank = { id ->
+                    importedBank = id
+                    importKind = null
+                    selectDeck(1f)
+                })
+        }
         if (guideStep < 4) GuideOverlay(guideStep, content, colors, topReserve) { guideStep = it; settings.guideStep = it }
 
-        if (settingsOpen || settingsRetained || deck.position.value < -.6001f) {
-            SettingsSheet(colors, dark, markQueriedWords, silentInference, customStatusBar, bookmarkVisible, provider, settings,
+        if (settingsOpen || settingsMotion.position.value > -.999f) key(settingsVisit) {
+            SettingsSheet(colors, provider, settings, settingsSection, headerTop,
                 updateStatus, updateInfo, updateChecking, focusStatus,
                 Modifier.align(Alignment.TopCenter).fillMaxSize().graphicsLayer {
-                    translationX = with(density) { width.toPx() } * (-1f - deck.position.value)
-                }
-                    .navigationBarsPadding().padding(top = topReserve).graphicsLayer {
+                    translationX = with(density) { width.toPx() } * settingsMotion.position.value
+                }.pointerInput(Unit) { detectTapGestures { } }.graphicsLayer {
                         renderEffect = if (updateBlur > .1f) BlurEffect(updateBlur, updateBlur, TileMode.Clamp) else null
                     },
-                onDark = { dark = it; settings.dark = it },
-                onMarkQueriedWords = { markQueriedWords = it; settings.markQueriedWords = it },
-                onSilentInference = { silentInference = it; settings.silentInference = it },
-                onCustomStatusBar = { customStatusBar = it; settings.customStatusBar = it },
-                onBookmarkVisible = { bookmarkVisible = it; settings.bookmarkVisible = it },
+                confirmingDiscard = confirmDiscard,
+                onDirtyChanged = { if (settingsOpen) settingsDirty = it },
+                onConfirmDiscard = ::closeSettings,
+                onKeepEditing = { confirmDiscard = false },
                 onCheckUpdate = {
                     if (!updateChecking) updateScope.launch {
                         updateChecking = true
@@ -1043,13 +1049,18 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
                 onDownloadUpdate = { updateInfo?.let(::startDownload) },
                 onSave = {
                     provider = settings.provider()
+                    dark = settings.dark
+                    markQueriedWords = settings.markQueriedWords
+                    silentInference = settings.silentInference
+                    customStatusBar = settings.customStatusBar
+                    bookmarkVisible = settings.bookmarkVisible
                     scale = ReaderScale(settings.bodySize, settings.lineFactor, settings.sideMargin, settings.paragraphGap)
                     focusUrl = settings.focusUrl
                     focusSubjectId = settings.focusSubjectId
                     focusItemId = settings.focusItemId
                     cutoutFactor = settings.cutoutFactor; learningSettingsRevision++
-                    selectDeck(0f)
-                }, onBack = { selectDeck(0f) }, onArchive = { analysisTransferOpen = true })
+                    closeSettings()
+                }, onBack = ::requestSettingsBack, onArchive = { analysisTransferOpen = true })
         }
         AnimatedVisibility(analysisTransferOpen, enter = fadeIn(tween(180)), exit = fadeOut(tween(260))) {
             AnalysisTransferOverlay(content, store, engine, provider, article, colors, topReserve) { analysisTransferOpen = false }
@@ -1090,7 +1101,7 @@ private fun ReaderContent(content: Content, store: UserStore, settings: SecureSe
 }
 
 @Composable
-internal fun FocusStatusLabel(status: String, colors: Palette, onClick: () -> Unit) {
+internal fun FocusStatusLabel(status: String, colors: Palette, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val active = status.startsWith("正在记录")
     val label = when {
         active -> "专注 · 已上报"
@@ -1101,8 +1112,8 @@ internal fun FocusStatusLabel(status: String, colors: Palette, onClick: () -> Un
         status.contains("未配置") -> "专注 · 未配置"
         else -> "专注 · 不可用"
     }
-    Text("${if (active) "●" else "○"} $label", Modifier.clickable(onClick = onClick),
-        color = if (active) colors.word else colors.muted, fontSize = 10.sp)
+    Text("${if (active) "●" else "○"} $label", modifier.clickable(onClick = onClick).padding(vertical = 6.dp),
+        color = if (active) colors.word else colors.muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
 }
 
 
@@ -1298,11 +1309,12 @@ private fun ArticleDrawer(
     val viewport = LocalReaderViewport.current
     val density = LocalDensity.current
     val listLayer = rememberGraphicsLayer()
+    val twoColumns = viewport.split && viewport.width * .8f >= 600f
     var headerHeight by remember { mutableStateOf(80.dp) }
     var footerHeight by remember { mutableStateOf(116.dp) }
     var footerY by remember { mutableStateOf(0f) }
     Box(modifier) {
-        LazyVerticalGrid(columns = GridCells.Fixed(if (viewport.split && viewport.width * .8f >= 600f) 2 else 1), modifier = Modifier.fillMaxSize().testTag("article-directory-list").drawWithContent {
+        LazyVerticalGrid(columns = GridCells.Fixed(if (twoColumns) 2 else 1), modifier = Modifier.fillMaxSize().testTag("article-directory-list").drawWithContent {
             listLayer.record { this@drawWithContent.drawContent() }
             // The glass bars draw the blurred recording, not an opaque paper slab.
             // Hide the sharp copy there so text cannot bleed through its blur.
@@ -1321,7 +1333,8 @@ private fun ArticleDrawer(
                     }
                     Text(smallCapsTitle(article.title, 18f), color = colors.ink, fontFamily = ReadingFont, fontSize = 18.sp,
                         lineHeight = 24.sp, fontWeight = if (article.id == lastId) FontWeight.Bold else FontWeight.Normal,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 5.dp, bottom = 7.dp))
+                        minLines = if (twoColumns) 2 else 1, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 5.dp, bottom = 7.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         Text("词 $words", color = colors.word, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         Text("句 $sentences", color = colors.paragraph, fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -1341,18 +1354,7 @@ private fun ArticleDrawer(
         FrostedBar(listLayer, colors, footerY, Modifier.align(Alignment.BottomCenter).fillMaxWidth().quietClickable { }
             .onGloballyPositioned { footerY = it.positionInParent().y }, opaqueBackdrop = false, tint = 0f) {
         Column(Modifier.onSizeChanged { footerHeight = with(density) { it.height.toDp() } }.navigationBarsPadding().padding(bottom = 10.dp)) {
-        if (viewport.split) Row(Modifier.fillMaxWidth().padding(horizontal = 25.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(32.dp)) {
-            JumpLink("导入文章", colors, onClick = onImport)
-            JumpLink("使用引导", colors, onClick = onGuide)
-            JumpLink("接口与外观设置", colors, Modifier.weight(1f), bold = true, onClick = onSettings)
-        } else {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 25.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-            JumpLink("导入文章", colors, onClick = onImport)
-            JumpLink("使用引导", colors, onClick = onGuide)
-        }
-        JumpLink("接口与外观设置", colors, Modifier.fillMaxWidth().padding(horizontal = 25.dp, vertical = 6.dp), bold = true, onClick = onSettings)
-        }
+            SidePanelTools("导入文章", colors, onImport, onGuide, onSettings)
         } }
     }
 }
@@ -1362,7 +1364,7 @@ private fun SilentSheet(
     article: Article, sentences: List<ArticleSentence>, cached: List<CachedSentence>, run: SilentRunState,
     enabled: Boolean, hasKey: Boolean, tasks: List<QueryTask>, percent: String, colors: Palette, screenWidth: androidx.compose.ui.unit.Dp,
     screenHeight: androidx.compose.ui.unit.Dp, topReserve: androidx.compose.ui.unit.Dp, motion: Float,
-    onPercentGeometry: (TokenGlyph) -> Unit, onRetry: () -> Unit
+    onPercentGeometry: (TokenGlyph) -> Unit, onRetry: () -> Unit, onConfigure: () -> Unit
 ) {
     val density = LocalDensity.current
     val viewport = LocalReaderViewport.current
@@ -1441,6 +1443,7 @@ private fun SilentSheet(
                 modifier = Modifier.padding(top = 9.dp))
         }
         if (enabled && run.error != null && hasKey) JumpLink("重试静默推理", colors, Modifier.padding(top = 12.dp), bold = true, onClick = onRetry)
+        if (enabled && !hasKey) JumpLink("设置接口", colors, Modifier.padding(top = 12.dp), bold = true, onClick = onConfigure)
         Spacer(Modifier.height(24.dp))
     }, trailing = {
         RevealElement(4, article.id) {
@@ -1506,7 +1509,8 @@ private fun SentenceSheet(
     content: Content, store: UserStore, colors: Palette, scale: ReaderScale,
     markQueriedWords: Boolean, queryRevision: Int, motion: Float,
     nestedWord: WordTarget?, modifier: Modifier,
-    onGeometry: (List<TokenGlyph>) -> Unit, onWord: (Token, TokenGlyph) -> Unit, onRetry: () -> Unit, onAction: () -> Unit
+    onGeometry: (List<TokenGlyph>) -> Unit, onWord: (Token, TokenGlyph) -> Unit, onRetry: () -> Unit,
+    onConfigure: () -> Unit, onAction: () -> Unit, canRetry: Boolean
 ) {
     val text = target.sentence.text
     val viewport = LocalReaderViewport.current
@@ -1606,7 +1610,7 @@ private fun SentenceSheet(
                 Text(error, color = colors.paragraph, fontSize = 14.sp)
             }
             RevealElement(2, error) {
-                JumpLink("重试解析", colors, Modifier.padding(top = 12.dp), onClick = onRetry)
+                QueryRecoveryActions(colors, canRetry, onRetry, onConfigure)
             }
         } else if (result == null || result.optString("translation_zh").isBlank() || result.optJSONArray("clauses") == null || result.optJSONArray("glosses") == null) {
             RevealElement(1, target) { ProgressBlock(progress, colors) }
@@ -1622,6 +1626,7 @@ internal fun WordSheet(
     topReserve: androidx.compose.ui.unit.Dp, motion: Float, onTitleGeometry: (TokenGlyph) -> Unit,
     onRetry: () -> Unit, onConfigure: () -> Unit, onAction: (() -> Unit)? = null,
     heading: String = "WORD / ${if (article.kind == "导入") "LOCAL" else article.id.uppercase()}", allowQueries: Boolean = true,
+    canRetry: Boolean = true,
     onBlankTap: (() -> Unit)? = null, onHold: ((Offset) -> Unit)? = null,
     beforeSenses: @Composable () -> Unit = {}, afterContent: @Composable () -> Unit = {}
 ) {
@@ -1706,7 +1711,7 @@ internal fun WordSheet(
         if (result != null && result.optJSONObject("context_sense") != null) {
             val contextSense = result.optJSONObject("context_sense")
             RevealElement(2, target to contextSense?.toString()) {
-                UiHeading("01  IN CONTEXT", colors, size = 11)
+                UiHeading("IN CONTEXT", colors, size = 11)
             }
             Spacer(Modifier.height(8.dp))
             RevealElement(3, target to contextSense?.toString(), Modifier.fillMaxWidth()) {
@@ -1732,7 +1737,7 @@ internal fun WordSheet(
         if (dictionarySenses.isNotEmpty() || (common != null && common.length() > 0)) {
             val senseKey = target to common?.toString()
             RevealElement(5, senseKey) {
-                UiHeading("02  MEANINGS", colors, size = 11)
+                UiHeading("MEANINGS", colors, size = 11)
             }
             Spacer(Modifier.height(10.dp))
             dictionarySenses.forEachIndexed { index, (part, meaning) ->
@@ -1764,7 +1769,7 @@ internal fun WordSheet(
         val derivatives = result?.optJSONArray("derivatives")
         if (derivatives != null && derivatives.length() > 0) {
             RevealElement(9, target to derivatives.toString()) {
-                UiHeading("03  DERIVATIVES", colors, size = 11)
+                UiHeading("DERIVATIVES", colors, size = 11)
             }
             Spacer(Modifier.height(9.dp))
             for (i in 0 until derivatives.length()) {
@@ -1796,15 +1801,20 @@ internal fun WordSheet(
                 Text(error, color = colors.paragraph, fontSize = 14.sp, lineHeight = 20.sp)
             }
             RevealElement(7, error) {
-                Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(22.dp)) {
-                    JumpLink("重试", colors, onClick = onRetry)
-                    JumpLink("设置接口", colors, onClick = onConfigure)
-                }
+                QueryRecoveryActions(colors, canRetry, onRetry, onConfigure)
             }
         }
         afterContent()
         Spacer(Modifier.height(32.dp))
     })
+}
+
+@Composable
+private fun QueryRecoveryActions(colors: Palette, canRetry: Boolean, onRetry: () -> Unit, onConfigure: () -> Unit) {
+    Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(22.dp)) {
+        if (canRetry) JumpLink("重试解析", colors, onClick = onRetry)
+        JumpLink("设置接口", colors, onClick = onConfigure)
+    }
 }
 
 private fun splitDictionarySenses(translation: String): List<Pair<String, String>> =

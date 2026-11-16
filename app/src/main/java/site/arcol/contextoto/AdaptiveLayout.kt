@@ -21,6 +21,7 @@ internal data class ReaderViewport(val width: Float = 360f, val height: Float = 
 }
 
 internal val LocalReaderViewport = staticCompositionLocalOf { ReaderViewport() }
+internal const val DETAIL_PRIMARY_WEIGHT = .44f
 /** Glyph geometry is in root coordinates; panes live inside the consumed safe insets. */
 internal val LocalSurfaceOrigin = staticCompositionLocalOf { Offset.Zero }
 
@@ -55,8 +56,8 @@ internal fun DetailColumns(
         Column(modifier) {
         headerContent()
         Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(viewport.gap.dp)) {
-            RetainedColumn(Modifier.weight(.44f).fillMaxHeight().testTag("detail-primary"), primaryScroll) { leadingContent() }
-            RetainedColumn(Modifier.weight(.56f).fillMaxHeight().testTag("detail-reference"), referenceScroll) { trailingContent() }
+            RetainedColumn(Modifier.weight(DETAIL_PRIMARY_WEIGHT).fillMaxHeight().testTag("detail-primary"), primaryScroll) { leadingContent() }
+            RetainedColumn(Modifier.weight(1f - DETAIL_PRIMARY_WEIGHT).fillMaxHeight().testTag("detail-reference"), referenceScroll) { trailingContent() }
         }
         }
     } else {

@@ -33,8 +33,8 @@ internal fun BankManagementSection(bank: WordBank, content: Content, learning: L
     var expanded by remember { mutableStateOf(false) }
     var search by remember(bank.id) { mutableStateOf("") }
     var name by remember(bank.id, bank.name) { mutableStateOf(bank.name) }
-    var choosingMerge by remember { mutableStateOf(false) }
-    var deleting by remember { mutableStateOf(false) }
+    var choosingMerge by remember(bank.id) { mutableStateOf(false) }
+    var deleteTarget by remember(bank.id) { mutableStateOf<WordBank?>(null) }
     var working by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope(); val context = LocalContext.current
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
@@ -89,13 +89,20 @@ internal fun BankManagementSection(bank: WordBank, content: Content, learning: L
                         }
                     } }
                 } }
-                JumpLink("删除当前词库", colors, Modifier.fillMaxWidth(), enabled = !working) { deleting = !deleting }
-                RetainedFoldout(deleting, "bank-delete") { Column {
-                    Text("只移除这个词库。已加入的词、释义快照、复习记录、缓存和热度保留。", color = colors.paragraph, fontSize = 12.sp, lineHeight = 20.sp)
-                    JumpLink("确认移除词库", colors, Modifier.fillMaxWidth(), enabled = !working) {
-                        learning.deleteBank(bank.id); deleting = false; onMessage("已移除词库，学习数据和释义快照保留")
+                JumpLink("删除当前词库", colors, Modifier.fillMaxWidth(), enabled = !working) {
+                    deleteTarget = if (deleteTarget == null) bank else null
+                }
+                val target = deleteTarget
+                RetainedFoldout(target != null, "bank-delete-${bank.id}") {
+                    if (target != null) Column {
+                        Text("已加入的词、释义快照和学习记录会保留。", color = colors.paragraph, fontSize = 12.sp, lineHeight = 20.sp)
+                        JumpLink("确认移除「${target.name}」", colors, Modifier.fillMaxWidth(), enabled = !working) {
+                            learning.deleteBank(target.id)
+                            deleteTarget = null
+                            onMessage("已移除「${target.name}」")
+                        }
                     }
-                } }
+                }
             }
         }
     }

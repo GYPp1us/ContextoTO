@@ -36,7 +36,7 @@ import kotlinx.coroutines.withContext
 
 @Composable
 internal fun ImportOverlay(vocabulary: Boolean, content: Content, learning: LearningStore, colors: Palette, top: Dp,
-                           onClose: () -> Unit) {
+                            onClose: () -> Unit, onOpenArticle: (String) -> Unit, onOpenBank: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var preview by remember { mutableStateOf<ImportPreview?>(null) }
@@ -44,7 +44,7 @@ internal fun ImportOverlay(vocabulary: Boolean, content: Content, learning: Lear
     var name by remember { mutableStateOf("") }
     var parsing by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
-    var result by remember { mutableStateOf<String?>(null) }
+    var result by remember { mutableStateOf<ImportResult?>(null) }
     var bankId by remember { mutableStateOf<String?>(null) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isEmpty()) { onClose(); return@rememberLauncherForActivityResult }
@@ -69,12 +69,13 @@ internal fun ImportOverlay(vocabulary: Boolean, content: Content, learning: Lear
                         previews.firstOrNull()?.suggestedName ?: "导入词库")
                 }
                 name = if (vocabulary) preview!!.suggestedName else preview!!.articles.singleOrNull()?.title.orEmpty()
-            } catch (failure: Exception) { error = failure.message ?: "解析失败" }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (failure: Exception) { error = failure.message ?: "解析失败" }
             finally { parsing = false }
         }
     }
     LaunchedEffect(Unit) { launcher.launch(arrayOf("text/*", "application/zip", "application/octet-stream")) }
-    BackHandler(!saving) { onClose() }
+    BackHandler(true) { if (!saving) onClose() }
     GlassScrim(colors) { if (!saving) onClose() }
     val plan = preview
     val split = LocalReaderViewport.current.split
@@ -85,12 +86,19 @@ internal fun ImportOverlay(vocabulary: Boolean, content: Content, learning: Lear
                 saving = true
                 scope.launch {
                     try {
-                        val counts = withContext(Dispatchers.IO) { learning.commitImport(plan, name, bankId) }
-                        result = "已导入 ${counts.first} 篇文章、${counts.second} 个词元；原有内容和学习记录已保留。"
-                    } catch (failure: Exception) { error = failure.message ?: "保存失败，未提交内容" }
+                        error = null
+                        result = withContext(Dispatchers.IO) { learning.commitImport(plan, name, bankId) }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (failure: Exception) { error = failure.message ?: "保存失败，未提交内容" }
                     finally { saving = false }
                 }
             }
+        }
+        result?.let { imported ->
+            imported.articleIds.firstOrNull()?.let { id ->
+                JumpLink(if (imported.articleIds.size == 1) "打开文章" else "打开首篇文章", colors, onClick = { onOpenArticle(id) })
+            }
+            imported.bankId?.let { id -> JumpLink("查看词库", colors, onClick = { onOpenBank(id) }) }
         }
         if (!saving) JumpLink(if (result == null) "取消" else "完成", colors, Modifier.padding(vertical = 20.dp), onClick = onClose)
     }
@@ -98,9 +106,14 @@ internal fun ImportOverlay(vocabulary: Boolean, content: Content, learning: Lear
         .padding(horizontal = 28.dp, vertical = 12.dp), leading = {
         RevealElement(0, vocabulary) { UiHeading(if (vocabulary) "IMPORT WORDS" else "IMPORT READING", colors, size = 34) }
         Spacer(Modifier.height(25.dp))
-        if (parsing || saving) ProgressBlock(null, colors, if (saving) "正在保存" else "本地解析 · 不调用模型")
+        if (parsing || saving) LocalWorkProgress(if (saving) "正在保存导入内容" else "正在读取并校验文件", colors)
         error?.let { Text(it, color = colors.paragraph, fontSize = 15.sp, modifier = Modifier.padding(vertical = 18.dp)) }
-        result?.let { Text(it, color = colors.word, fontSize = 18.sp, modifier = Modifier.padding(vertical = 18.dp)) }
+        result?.let {
+            val summary = if (vocabulary) "词库已保存 · 新增 ${it.wordCount} 个词元"
+                else if (it.articleIds.isEmpty()) "文章已存在 · 未新增"
+                else "已导入 ${it.articleIds.size} 篇文章"
+            Text(summary, color = colors.word, fontSize = 18.sp, modifier = Modifier.padding(vertical = 18.dp))
+        }
         if (plan != null && result == null && !saving) {
             RevealElement(1, plan) { Text(if (vocabulary) "${plan.words.map { it.word }.distinct().size} 个词元" else "${plan.articles.size} 篇文章",
                 color = colors.word, fontSize = 15.sp) }
