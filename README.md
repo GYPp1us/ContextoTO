@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/banner-dark.svg">
+  <img src="docs/brand/banner-light.svg" alt="contexTO — 词在句中，句在篇中。" width="100%">
+</picture>
+
 # ContextoTO
 
 面向中文母语者的安卓篇章英语阅读应用。预置 48 篇考研英语一风格文章，以及 3,000 主背词、4,801 考纲词与 319 零语料词。短按词查看本句义项，长按词查看所在句的整句释义与从句结构；文章目录与查询层均覆盖整页磨砂。
@@ -15,6 +20,8 @@
 当前发布：[v1.0.0-rc7](https://github.com/GYPp1us/ContextoTO/releases/tag/v1.0.0-rc7)，更新内容见 [rc7 说明](docs/releases/v1.0.0-rc7.md)。历史版本说明保留，不倒改旧验收记录。
 
 ## 开发
+
+图标、色彩、字号层级与宣传图见 [美术与品牌规范](docs/ART_DIRECTION.md)，资产由 `tools/brand/build_brand.py` 生成。
 
 横屏使用统一的可用窗口版式：紧凑单行顶栏、连贯单栏阅读，解析与复习按内容角色分区；大字号或窄窗口自然回落到单列。旋转保留面板、查询浮层、当前题目和设置草稿，并按字符锚点恢复阅读位置。安全区统一避让左右挖孔与导航栏，过渡坐标随重排更新。实现与截图验收见 [横屏审查说明](docs/LANDSCAPE_REVIEW.md)。本改动仅提 PR，不改变 rc7 版本号或发布标签。
 

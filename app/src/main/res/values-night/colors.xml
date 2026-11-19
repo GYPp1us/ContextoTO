@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Same values as palette(dark = true) in MainActivity.kt. -->
+    <color name="contexto_paper">#252525</color>
+</resources>

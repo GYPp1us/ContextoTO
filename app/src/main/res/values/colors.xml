@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Same values as palette(dark = false) in MainActivity.kt; used before Compose draws. -->
+    <color name="contexto_paper">#F2F0EA</color>
+</resources>
